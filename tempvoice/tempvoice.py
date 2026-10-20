@@ -528,6 +528,7 @@ class TempVoice(DashboardIntegration, commands.Cog):
         self,
         guild: discord.Guild,
         channel_id: int,
+        /,
         **updates: Any,
     ) -> TempVoiceRecord:
         async with self.config.guild(guild).temp_channels() as records:
