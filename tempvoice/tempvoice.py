@@ -523,7 +523,7 @@ class TempVoice(DashboardIntegration, commands.Cog):
         overwrite.view_channel = True
         overwrite.connect = True
         await channel.set_permissions(member, overwrite=overwrite, reason=reason)
-
+        
     async def _update_record(
         self,
         guild: discord.Guild,
