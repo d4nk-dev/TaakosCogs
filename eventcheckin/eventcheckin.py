@@ -1394,21 +1394,26 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             return channel
         return fallback if isinstance(fallback, discord.TextChannel) else None
 
+    @staticmethod
+    async def _ack(interaction: discord.Interaction) -> None:
+        """Acknowledge a click right away (Discord drops it after 3 seconds); replies then go through followup."""
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
     async def open_create_modal(self, interaction: discord.Interaction) -> None:
-        """Open the create modal for staff; used by the panel button and the slash command."""
+        """Open the create flow for staff; used by the panel button and the slash command."""
+        await self._ack(interaction)
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("Events can only be created in a server.", ephemeral=True)
+            await interaction.followup.send("Events can only be created in a server.", ephemeral=True)
             return
         if not await self._can_manage_events(interaction.user):
-            await interaction.response.send_message(
-                "You need the **Manage Events** permission to create events.", ephemeral=True
-            )
+            await interaction.followup.send("You need the **Manage Events** permission to create events.", ephemeral=True)
             return
         templates = await self.config.guild(interaction.guild).templates()
         default = await self._announce_destination(interaction.guild, interaction.channel)
         text = "Choose the channel this event is meant for (you can change it when you post)"
         text += ", and optionally a saved template, then press **Continue**." if templates else ", then press **Continue**."
-        await interaction.response.send_message(
+        await interaction.followup.send(
             text, view=CreateStartView(self, interaction.user.id, templates, default), ephemeral=True
         )
 
@@ -1606,9 +1611,10 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         )
 
     async def open_drafts(self, interaction: discord.Interaction) -> None:
+        await self._ack(interaction)
         guild = interaction.guild
         if not guild or not isinstance(interaction.user, discord.Member) or not await self._can_manage_events(interaction.user):
-            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
+            await interaction.followup.send("You need the **Manage Events** permission to do that.", ephemeral=True)
             return
         events = await self.config.guild(guild).events()
         drafts = sorted(
@@ -1616,9 +1622,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             key=lambda event: int(event["starts_at"]),
         )
         if not drafts:
-            await interaction.response.send_message("No unposted drafts. Press **Create Event** to start one.", ephemeral=True)
+            await interaction.followup.send("No unposted drafts. Press **Create Event** to start one.", ephemeral=True)
             return
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"{len(drafts)} unposted draft(s):", view=DraftPickerView(self, interaction.user.id, drafts), ephemeral=True
         )
 

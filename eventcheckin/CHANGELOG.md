@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.11.1
+
+- **Fix: "Unknown interaction" error on Create Event.** The button now acknowledges your click immediately and loads the channel and template pickers afterwards, so a slow moment on the bot can no longer make Discord drop the click after its 3-second limit. The Drafts button works the same way.
+
 ## 1.11.0
 
 - **Every announcement is an embed** now, so the event channel stays tidy: *Starting soon* countdown (amber, with start time, going count and location), *Event started* (green), *Event cancelled* (red, with the reason), *Moved up from the waitlist*, and a new *Event finalized* report (checked in, no-shows, attendance %, reward role). Pings still notify because they sit in the message text above the embed. Each embed links back to the event post. Cancellation DMs and command replies (`setup`, `channel`, `panel`, `checkin`, ...) are embeds too.
