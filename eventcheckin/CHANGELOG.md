@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.0
+
+- **Start event** button in the Manage menu (asks for confirmation). It locks sign-ups, marks the event as started and tells the event channel. After that the RSVP button is switched off and new RSVPs, role changes and stale RSVP prompts are refused. Members who already RSVPed can still check in (check-in opens as soon as you press Start, even if the scheduled time hasn't arrived) or withdraw, and waitlisted members can still be promoted if a seat opens. Reminders stop once started. Finalize works as before.
+
 ## 1.9.0
 
 - **Drafts first.** Creating an event no longer posts anything. It saves a draft and opens the private Manage menu, so you can set the details, image, requirements and roles before anyone sees it.

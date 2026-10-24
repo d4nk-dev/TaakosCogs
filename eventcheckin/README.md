@@ -35,6 +35,7 @@ Every event post has a **Manage** button that only staff can use. You also get t
 | Image | Set a banner from a link to an externally hosted image. **Remove image** clears it |
 | Requirements | Up to 10 confirmations (one per line). Members must press each one before they can RSVP and again before checking in |
 | Roles | Up to 10 roles (Tank / Healer / DPS, Driver / Navigator...), each with its own slots and up to 5 requirements |
+| Start event | Locks sign-ups, marks the event started and opens check-in. Members already in can still check in or withdraw |
 | Post to channel | Choose the channel and roles to ping, then publish the draft |
 | Save as template | Saves the setup (including requirements, roles and image link) for the Create Event dropdown. 25 per server |
 | Add to Discord events | Creates a native scheduled event (needs a location) |

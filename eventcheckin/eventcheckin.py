@@ -67,6 +67,8 @@ class EventControls(discord.ui.View):
             requirements = [{"id": slot, "text": f"Requirement {slot}"} for slot in range(1, MAX_REQUIREMENTS + 1)]
         else:
             requirements = []
+            if event.get("started_at"):
+                self.rsvp.disabled = True
         for position, requirement in enumerate(requirements[:MAX_REQUIREMENTS]):
             slot = int(requirement["id"])
             button = discord.ui.Button(
@@ -748,6 +750,10 @@ class EventManageView(discord.ui.View):
     async def roles(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_roles_editor(interaction, self.event_id)
 
+    @discord.ui.button(label="Start event", emoji="▶️", style=discord.ButtonStyle.primary, row=3)
+    async def start_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.request_start(interaction, self.event_id)
+
     @discord.ui.button(label="Post to channel", emoji="📣", style=discord.ButtonStyle.success, row=3)
     async def post_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_post_menu(interaction, self.event_id)
@@ -984,7 +990,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         embed.add_field(name="Duration", value=f"{int(event.get('duration_minutes') or 60)} minutes")
         embed.add_field(name="Capacity", value=capacity)
         embed.add_field(name="RSVPs", value=f"{counts['going']} going\n{counts['waitlist']} waiting")
-        embed.add_field(name="Status", value=event["status"].title())
+        embed.add_field(name="Status", value="Started (sign-ups locked)" if event.get("started_at") and event["status"] == "open" else event["status"].title())
         if event.get("location"):
             embed.add_field(name="Location", value=event["location"], inline=False)
         if requirements:
@@ -1231,6 +1237,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         if event["status"] != "open":
             await interaction.response.send_message("Registration for this event is closed.", ephemeral=True)
             return
+        if action == "rsvp" and event.get("started_at"):
+            await interaction.response.send_message("🔒 Sign-ups are locked: this event has already started.", ephemeral=True)
+            return
         attendees = event.setdefault("attendees", {})
         key = str(interaction.user.id)
         current = attendees.get(key)
@@ -1286,6 +1295,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         else:
             early = event["starts_at"] - int(await self.config.guild(interaction.guild).checkin_early_minutes()) * 60
             late = event["starts_at"] + int(await self.config.guild(interaction.guild).checkin_late_minutes()) * 60
+            if event.get("started_at"):  # staff pressed Start: check-in is open from then on
+                early = min(early, int(event["started_at"]))
+                late = max(late, int(event["started_at"]) + int(await self.config.guild(interaction.guild).checkin_late_minutes()) * 60)
             if not current or current.get("status") != "going":
                 response = "You must have a confirmed RSVP before checking in."
             elif missing:
@@ -1520,6 +1532,8 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         embed.add_field(name="Image", value=image)
         posted = event.get("channel_id") and event.get("message_id")
         status = str(event["status"]).title() + (" (not posted yet)" if event["status"] == "draft" and not posted else "")
+        if event["status"] == "open" and event.get("started_at"):
+            status = f"Started <t:{int(event['started_at'])}:R> (sign-ups locked)"
         embed.add_field(name="Status", value=status)
         if event.get("post_channel_id") or posted:
             embed.add_field(name="Channel", value=f"<#{event.get('channel_id') if posted else event['post_channel_id']}>")
@@ -2004,8 +2018,11 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             except commands.BadArgument:
                 await interaction.response.edit_message(content="That event no longer exists.", view=None)
                 return
-            if event["status"] != "open":
-                await interaction.response.edit_message(content="Registration for this event is closed.", view=None)
+            if event["status"] != "open" or event.get("started_at"):
+                await interaction.response.edit_message(
+                    content="Registration for this event is closed." if event["status"] != "open" else "🔒 Sign-ups are locked: this event has already started.",
+                    view=None,
+                )
                 return
             current_ids = [int(item["id"]) for item in self._requirements(event)]
             if set(current_ids) - set(shown_ids):
@@ -2051,8 +2068,11 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             except commands.BadArgument:
                 await interaction.response.edit_message(content="That event no longer exists.", view=None)
                 return
-            if event["status"] != "open":
-                await interaction.response.edit_message(content="Registration for this event is closed.", view=None)
+            if event["status"] != "open" or event.get("started_at"):
+                await interaction.response.edit_message(
+                    content="Registration for this event is closed." if event["status"] != "open" else "🔒 Sign-ups are locked: this event has already started.",
+                    view=None,
+                )
                 return
             if self._missing_requirements(event, member.id):
                 await interaction.response.edit_message(
@@ -2091,8 +2111,14 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             await interaction.response.edit_message(content="That event no longer exists.", view=None)
             return
         role = self._role(event, role_id)
-        if event["status"] != "open" or role is None:
-            text = "Registration for this event is closed." if event["status"] != "open" else "That role was removed."
+        if event["status"] != "open" or event.get("started_at") or role is None:
+            text = (
+                "Registration for this event is closed."
+                if event["status"] != "open"
+                else "🔒 Sign-ups are locked: this event has already started."
+                if event.get("started_at")
+                else "That role was removed."
+            )
             await interaction.response.edit_message(content=text, view=None)
             return
         if role.get("requirements"):
@@ -2121,8 +2147,12 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 await reply("That event no longer exists.")
                 return
             role = self._role(event, role_id)
-            if event["status"] != "open":
-                await reply("Registration for this event is closed.")
+            if event["status"] != "open" or event.get("started_at"):
+                await reply(
+                    "Registration for this event is closed."
+                    if event["status"] != "open"
+                    else "🔒 Sign-ups are locked: this event has already started."
+                )
                 return
             if role is None:
                 await reply("That role was removed. Press RSVP again to pick another.")
@@ -2211,6 +2241,61 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             await interaction.response.send_message(
                 embed=self._attendees_embed(context[3]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
             )
+
+    async def request_start(self, interaction: discord.Interaction, event_id: int) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        _guild, member, _events, event = context
+        if event["status"] == "draft":
+            await interaction.response.send_message("Post the event first, then you can start it.", ephemeral=True)
+            return
+        if event["status"] != "open":
+            await interaction.response.send_message(f"This event is already {event['status']}.", ephemeral=True)
+            return
+        if event.get("started_at"):
+            await interaction.response.send_message(f"Already started <t:{int(event['started_at'])}:R>.", ephemeral=True)
+            return
+        waiting = sum(record.get("status") == "waitlist" for record in event.get("attendees", {}).values())
+        await interaction.response.send_message(
+            f"Start **{discord.utils.escape_markdown(event['title'])}** now?\n"
+            "• New sign-ups and role changes are locked (the RSVP button is switched off)\n"
+            "• The post is marked as started\n"
+            "• Members who already RSVPed can still check in or withdraw"
+            + (f"\n• {waiting} member(s) on the waitlist stay there and are still promoted if a seat opens" if waiting else ""),
+            view=ConfirmActionView(
+                member.id,
+                lambda it: self._run_start(it, event_id),
+                confirm_label="Start event",
+                confirm_style=discord.ButtonStyle.primary,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _run_start(self, interaction: discord.Interaction, event_id: int) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        guild, member = context[0], context[1]
+        async with self._lock(guild.id):
+            events, event = await self._event(guild, event_id)
+            if event["status"] != "open" or event.get("started_at"):
+                await interaction.response.edit_message(content="This event can't be started (already started or closed).", view=None)
+                return
+            event["started_at"] = self._now()
+            event["started_by"] = member.id
+            await self._save(guild, events, event)
+        await self._audit(guild, "event started", "completed", f"Event #{event_id} by {member.id}")
+        await interaction.response.edit_message(content="▶️ Event started. Sign-ups are locked.", view=None)
+        await self._refresh(guild, event)
+        channel = guild.get_channel(event.get("channel_id"))
+        if isinstance(channel, discord.TextChannel):
+            with suppress(discord.HTTPException):
+                await channel.send(
+                    f"▶️ **{discord.utils.escape_markdown(event['title'])}** has started. Sign-ups are now locked.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
     async def request_finalize(self, interaction: discord.Interaction, event_id: int) -> None:
         context = await self._staff_event(interaction, event_id)
@@ -2409,7 +2494,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             changed = False
             reminder_minutes = int(await conf.reminder_minutes())
             for event in events.values():
-                if event["status"] != "open" or event.get("reminder_sent_at"):
+                if event["status"] != "open" or event.get("reminder_sent_at") or event.get("started_at"):
                     continue
                 if now >= event["starts_at"] - reminder_minutes * 60:
                     channel = guild.get_channel(event.get("channel_id"))
