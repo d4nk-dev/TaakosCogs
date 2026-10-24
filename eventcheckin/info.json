@@ -2,7 +2,7 @@
     "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
     "name": "eventcheckin",
     "author": ["Taako"],
-    "version": "1.11.1",
+    "version": "1.12.0",
     "description": "Discord event registration with a Create Event form button, saved-template dropdown, event images, a guided RSVP walkthrough (requirements, role, role requirements), per-event posting channel choice, fillable roles with per-role requirements and waitlists, persistent RSVP and check-in controls, recurring drafts, ICS calendar exports, native Discord scheduled events, capacity limits, automatic waitlists and promotion, reminders, attendance/no-show finalization, role rewards, and CSV exports.",
     "install_msg": "EventCheckin loaded. Set it up with `[p]eventcheckin setup #event-logs <your timezone>`, then post the button with `[p]eventcheckin panel #create-event`. Staff create and manage events from the button and each post's Manage menu.",
     "short": "RSVPs, waitlists, reminders, attendance check-ins, no-shows, and rewards.",

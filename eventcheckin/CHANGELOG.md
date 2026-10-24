@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.0
+
+- **Names on the post.** The event post now lists who is going (**✅ Going**) and who is on the waiting list (**⏳ Waiting**) by name. With roles, each role lists its members and its waiting members. The old counts-only RSVPs field is gone.
+- **Image before posting.** The Image button now works on drafts (it used to fail because there was no post to update yet). The picture shows when you post the event.
+- **No helper text on the post.** Removed the default description line and the hints in field titles ("(you confirm these when you RSVP)" and similar). The description is empty unless staff write one, and the fields are just *Requirements* and *Role requirements*.
+
 ## 1.11.1
 
 - **Fix: "Unknown interaction" error on Create Event.** The button now acknowledges your click immediately and loads the channel and template pickers afterwards, so a slow moment on the bot can no longer make Discord drop the click after its 3-second limit. The Drafts button works the same way.

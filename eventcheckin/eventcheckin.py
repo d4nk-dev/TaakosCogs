@@ -977,28 +977,20 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         counts = self._counts(event)
         capacity = "Unlimited" if not event["capacity"] else str(event["capacity"])
         requirements = self._requirements(event)
-        has_roles = bool(self._roles(event))
-        if requirements:
-            default_text = "Press every requirement button below, then RSVP" + (" and pick your role." if has_roles else ".")
-        elif has_roles:
-            default_text = "Press RSVP to pick your role, then check in on the day."
-        else:
-            default_text = "Use the buttons below to register and check in."
         embed = discord.Embed(
             title=event["title"],
-            description=event.get("description") or default_text,
+            description=event.get("description") or None,
             color=self.COLOR if event["status"] == "open" else 0x95A5A6,
         )
         embed.add_field(name="Starts", value=f"<t:{event['starts_at']}:F>\n<t:{event['starts_at']}:R>")
         embed.add_field(name="Duration", value=f"{int(event.get('duration_minutes') or 60)} minutes")
         embed.add_field(name="Capacity", value=capacity)
-        embed.add_field(name="RSVPs", value=f"{counts['going']} going\n{counts['waitlist']} waiting")
         embed.add_field(name="Status", value="Started (sign-ups locked)" if event.get("started_at") and event["status"] == "open" else event["status"].title())
         if event.get("location"):
             embed.add_field(name="Location", value=event["location"], inline=False)
         if requirements:
             embed.add_field(
-                name="Requirements (you confirm these when you RSVP)",
+                name="Requirements",
                 value="\n".join(f"• {item['text']}" for item in requirements)[:1024],
                 inline=False,
             )
@@ -1177,35 +1169,49 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             )
         event["roles"] = roles
 
+    @staticmethod
+    def _names(user_ids: list[int], mark: str = "") -> str:
+        """Mentions, one per line, trimmed to fit an embed field."""
+        lines: list[str] = []
+        used = 0
+        for index, user_id in enumerate(user_ids):
+            line = f"{mark}<@{user_id}>"
+            if used + len(line) + 24 > 1024:
+                lines.append(f"+{len(user_ids) - index} more")
+                break
+            lines.append(line)
+            used += len(line) + 1
+        return "\n".join(lines)
+
     def _add_role_fields(self, embed: discord.Embed, event: dict[str, Any]) -> None:
+        """Who is in: one list per role, or plain Going / Waiting lists when the event has no roles."""
         roles = self._roles(event)
-        if not roles:
-            return
         attendees = sorted(event.get("attendees", {}).values(), key=lambda record: record.get("registered_at", 0))
+        in_ids = [r["user_id"] for r in attendees if r.get("status") in {"going", "checked_in"}]
+        waiting_ids = [r["user_id"] for r in attendees if r.get("status") == "waitlist"]
+        if not roles:
+            embed.add_field(name=f"✅ Going ({len(in_ids)})", value=self._names(in_ids) or "—", inline=False)
+            if waiting_ids:
+                embed.add_field(name=f"⏳ Waiting ({len(waiting_ids)})", value=self._names(waiting_ids), inline=False)
+            return
         for role in roles:
             slots = int(role.get("slots") or 0)
             members = [r["user_id"] for r in attendees if r.get("role_id") == role["id"] and r.get("status") in {"going", "checked_in"}]
-            waiting = sum(r.get("role_id") == role["id"] and r.get("status") == "waitlist" for r in attendees)
-            lines = [f"<@{user_id}>" for user_id in members[:15]]
-            if len(members) > 15:
-                lines.append(f"+{len(members) - 15} more")
-            if not lines:
-                lines.append("*Open*")
+            waiting = [r["user_id"] for r in attendees if r.get("role_id") == role["id"] and r.get("status") == "waitlist"]
+            value = self._names(members[:12]) + (f"\n+{len(members) - 12} more" if len(members) > 12 else "") if members else "*Open*"
             if waiting:
-                lines.append(f"⏳ {waiting} waiting")
-            embed.add_field(name=f"{role['name']} ({len(members)}/{slots or '∞'})"[:256], value="\n".join(lines)[:1024])
+                value += "\n⏳ " + ", ".join(f"<@{user_id}>" for user_id in waiting[:8]) + (f" +{len(waiting) - 8}" if len(waiting) > 8 else "")
+            embed.add_field(name=f"{role['name']} ({len(members)}/{slots or '∞'})"[:256], value=value[:1024])
         known = {role["id"] for role in roles}
-        unassigned = [
-            r["user_id"] for r in attendees if r.get("status") in {"going", "checked_in"} and r.get("role_id") not in known
-        ]
+        unassigned = [r["user_id"] for r in attendees if r.get("status") in {"going", "checked_in"} and r.get("role_id") not in known]
         if unassigned:
-            embed.add_field(
-                name=f"No role yet ({len(unassigned)})",
-                value=("\n".join(f"<@{u}>" for u in unassigned[:15]) + "\nPress RSVP to pick a role.")[:1024],
-            )
+            embed.add_field(name=f"No role yet ({len(unassigned)})", value=self._names(unassigned))
+        unassigned_waiting = [r["user_id"] for r in attendees if r.get("status") == "waitlist" and r.get("role_id") not in known]
+        if unassigned_waiting:
+            embed.add_field(name=f"⏳ Waiting ({len(unassigned_waiting)})", value=self._names(unassigned_waiting))
         needs = [f"**{role['name']}**: " + "; ".join(role["requirements"]) for role in roles if role.get("requirements")]
         if needs:
-            embed.add_field(name="Role requirements (confirmed when you pick the role)", value="\n".join(needs)[:1024], inline=False)
+            embed.add_field(name="Role requirements", value="\n".join(needs)[:1024], inline=False)
 
     GREEN = 0x57F287
     AMBER = 0xFEE75C
@@ -1847,7 +1853,8 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             events, event = await self._event(guild, event_id)
             updated = {**event, "image_url": url}
             try:
-                await self._refresh(guild, updated, strict=True)
+                if event.get("message_id"):  # a draft has no post to update yet
+                    await self._refresh(guild, updated, strict=True)
             except commands.BadArgument as error:
                 await interaction.followup.send(f"⚠️ {error}", ephemeral=True)
                 return
@@ -1859,7 +1866,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 return
             await self._save(guild, events, updated)
         await interaction.followup.send(
-            "🖼️ Image set. If the post shows no picture, the link probably isn't a direct image link.", ephemeral=True
+            "🖼️ Image set." + ("" if event.get("message_id") else " It will show when you post the event."), ephemeral=True
         )
 
     async def handle_remove_image(self, interaction: discord.Interaction, event_id: int) -> None:
@@ -1875,7 +1882,8 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             events, event = await self._event(guild, event_id)
             updated = {**event, "image_url": None}
             try:
-                await self._refresh(guild, updated, strict=True)
+                if event.get("message_id"):
+                    await self._refresh(guild, updated, strict=True)
             except (commands.BadArgument, discord.HTTPException) as error:
                 await interaction.followup.send(f"⚠️ I couldn't update the post: {error}", ephemeral=True)
                 return
