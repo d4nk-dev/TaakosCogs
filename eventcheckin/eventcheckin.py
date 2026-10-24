@@ -32,6 +32,7 @@ HAS_LABEL = hasattr(discord.ui, "Label")
 
 MAX_REQUIREMENTS = 10
 REQUIREMENT_LENGTH = 80  # a requirement is also a button label, which Discord caps at 80
+MAX_PING_ROLES = 10
 MAX_ROLES = 10
 MAX_ROLE_REQUIREMENTS = 5
 ROLE_NAME_LENGTH = 40
@@ -121,6 +122,10 @@ class EventCreatePanel(discord.ui.View):
     )
     async def create(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_create_modal(interaction)
+
+    @discord.ui.button(label="Drafts", emoji="📝", style=discord.ButtonStyle.secondary, custom_id="eventcheckin:drafts")
+    async def drafts(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.open_drafts(interaction)
 
 
 class CreateEventModal(discord.ui.Modal):
@@ -743,6 +748,10 @@ class EventManageView(discord.ui.View):
     async def roles(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_roles_editor(interaction, self.event_id)
 
+    @discord.ui.button(label="Post to channel", emoji="📣", style=discord.ButtonStyle.success, row=3)
+    async def post_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.open_post_menu(interaction, self.event_id)
+
     @discord.ui.button(label="Save as template", emoji="💾", style=discord.ButtonStyle.secondary, row=1)
     async def save_template(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_save_template_modal(interaction, self.event_id)
@@ -766,6 +775,97 @@ class EventManageView(discord.ui.View):
     @discord.ui.button(label="Cancel event", emoji="🚫", style=discord.ButtonStyle.danger, row=2)
     async def cancel_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_cancel_modal(interaction, self.event_id)
+
+
+class PostEventView(discord.ui.View):
+    """Choose the channel and the roles to ping, then post a finished event."""
+
+    def __init__(
+        self,
+        cog: EventCheckin,
+        actor_id: int,
+        event_id: int,
+        channel: discord.TextChannel | None,
+        roles: list[discord.Role],
+    ) -> None:
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.actor_id = actor_id
+        self.event_id = event_id
+        self.channel_id: int | None = channel.id if channel else None
+        self.role_ids: list[int] = [role.id for role in roles]
+        channel_kwargs: dict[str, Any] = {}
+        if channel is not None:
+            channel_kwargs["default_values"] = [discord.SelectDefaultValue.from_channel(channel)]
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder="Post in which channel?",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+            **channel_kwargs,
+        )
+        self.channel_select.callback = self._channel_picked
+        self.add_item(self.channel_select)
+        role_kwargs: dict[str, Any] = {}
+        if roles:
+            role_kwargs["default_values"] = [discord.SelectDefaultValue.from_role(role) for role in roles[:MAX_PING_ROLES]]
+        self.role_select = discord.ui.RoleSelect(
+            placeholder="Roles to ping (optional)...", min_values=0, max_values=MAX_PING_ROLES, row=1, **role_kwargs
+        )
+        self.role_select.callback = self._roles_picked
+        self.add_item(self.role_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.actor_id:
+            return True
+        await interaction.response.send_message("These buttons are for the staff member who opened them.", ephemeral=True)
+        return False
+
+    async def _channel_picked(self, interaction: discord.Interaction) -> None:
+        self.channel_id = int(self.channel_select.values[0].id)
+        await interaction.response.defer()
+
+    async def _roles_picked(self, interaction: discord.Interaction) -> None:
+        self.role_ids = [int(role.id) for role in self.role_select.values]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Post now", emoji="📣", style=discord.ButtonStyle.success, row=2)
+    async def post_now(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.post_from_menu(interaction, self.event_id, self.channel_id, self.role_ids)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=2)
+    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.show_manage_menu(interaction, self.event_id)
+
+
+class DraftPickerView(discord.ui.View):
+    """Staff: pick one of the unposted drafts to keep editing."""
+
+    def __init__(self, cog: EventCheckin, actor_id: int, drafts: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.actor_id = actor_id
+        options = [
+            discord.SelectOption(
+                label=f"#{event['event_id']} {event['title']}"[:100],
+                value=str(event["event_id"]),
+                description=datetime.fromtimestamp(int(event["starts_at"]), timezone.utc).strftime("Starts %Y-%m-%d %H:%M UTC"),
+            )
+            for event in drafts[:25]
+        ]
+        self.select = discord.ui.Select(placeholder="Pick a draft to edit or post...", options=options)
+        self.select.callback = self._picked
+        self.add_item(self.select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.actor_id:
+            return True
+        await interaction.response.send_message("This prompt is not for you.", ephemeral=True)
+        return False
+
+    async def _picked(self, interaction: discord.Interaction) -> None:
+        await self.cog.show_manage_menu(interaction, int(self.select.values[0]))
 
 
 class EventCheckin(DashboardIntegration, commands.Cog):
@@ -1241,7 +1341,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             return
         templates = await self.config.guild(interaction.guild).templates()
         default = await self._announce_destination(interaction.guild, interaction.channel)
-        text = "Choose the channel the event will be posted in"
+        text = "Choose the channel this event is meant for (you can change it when you post)"
         text += ", and optionally a saved template, then press **Continue**." if templates else ", then press **Continue**."
         await interaction.response.send_message(
             text, view=CreateStartView(self, interaction.user.id, templates, default), ephemeral=True
@@ -1331,43 +1431,23 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         )
         event_id = int(event["event_id"])
 
-        posted = None
         async with self._lock(guild.id):
             events, stored = await self._event(guild, event_id)
             if template:
                 self._apply_template(stored, template)
             stored["location"] = location  # what the creator saw and confirmed wins over the template
+            stored["post_channel_id"] = destination.id
             await self._save(guild, events, stored)
-            try:
-                preview = {**stored, "status": "open"}
-                posted = await destination.send(embed=self._embed(preview), view=EventControls(self, preview))
-            except (discord.Forbidden, discord.HTTPException):
-                log.exception("Could not post EventCheckin panel for event %s in guild %s.", event_id, guild.id)
-            else:
-                stored.update(status="open", channel_id=destination.id, message_id=posted.id)
-                await self._save(guild, events, stored)
-                event = stored
-
-        if posted is None:
-            await interaction.followup.send(
-                f"Event **#{event_id}** was saved as a draft, but I could not post it in {destination.mention}. "
-                "Check my permissions there, then use the `post` command.",
-                ephemeral=True,
-            )
-            return
+            event = stored
 
         await self._audit(guild, "event created", "completed", f"Event #{event_id} by {member.id} via modal")
-        embed = discord.Embed(title=f"Event #{event_id} is live", description=f"[Jump to the event]({posted.jump_url})", color=self.COLOR)
-        embed.add_field(name="Starts", value=f"<t:{starts_at}:F>\n<t:{starts_at}:R>")
-        embed.add_field(name="Length", value=f"{duration} min")
-        embed.add_field(name="Capacity", value=str(capacity) if capacity else "Unlimited")
-        if location:
-            embed.add_field(name="Location", value=location, inline=False)
-        if self._requirements(event):
-            embed.add_field(name="Requirements", value=f"{len(self._requirements(event))} from the template", inline=False)
-        if self._roles(event):
-            embed.add_field(name="Roles", value=f"{len(self._roles(event))} from the template", inline=False)
-        embed.set_footer(text=f"Times are in {timezone_name}. Posted in #{destination.name}. Add an image or requirements below.")
+        embed = self._manage_embed(event)
+        embed.title = f"Event #{event_id} saved as a draft"
+        embed.description = (
+            f"**{discord.utils.escape_markdown(event['title'])}**\n"
+            "Nothing is posted yet. Finish editing with the buttons below, then press **Post to channel**."
+        )
+        embed.set_footer(text=f"Times are in {timezone_name}. Find unposted events later with the Drafts button on the panel.")
         await interaction.followup.send(embed=embed, view=EventManageView(self, member.id, event_id), ephemeral=True)
 
     @staticmethod
@@ -1438,8 +1518,150 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         embed.add_field(name="Requirements", value=str(len(self._requirements(event))))
         embed.add_field(name="Roles", value=str(len(self._roles(event))))
         embed.add_field(name="Image", value=image)
-        embed.add_field(name="Status", value=str(event["status"]).title())
+        posted = event.get("channel_id") and event.get("message_id")
+        status = str(event["status"]).title() + (" (not posted yet)" if event["status"] == "draft" and not posted else "")
+        embed.add_field(name="Status", value=status)
+        if event.get("post_channel_id") or posted:
+            embed.add_field(name="Channel", value=f"<#{event.get('channel_id') if posted else event['post_channel_id']}>")
+        pings = " ".join(f"<@&{role_id}>" for role_id in event.get("ping_role_ids") or [])
+        if pings:
+            embed.add_field(name="Pings on post", value=pings)
         return embed
+
+    async def show_manage_menu(self, interaction: discord.Interaction, event_id: int) -> None:
+        """Replace this private message with the manage menu (used by Back and the draft picker)."""
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        _guild, member, _events, event = context
+        await interaction.response.edit_message(
+            content=None, embed=self._manage_embed(event), view=EventManageView(self, member.id, event_id)
+        )
+
+    async def open_drafts(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if not guild or not isinstance(interaction.user, discord.Member) or not await self._can_manage_events(interaction.user):
+            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
+            return
+        events = await self.config.guild(guild).events()
+        drafts = sorted(
+            (event for event in events.values() if event.get("status") == "draft" and not event.get("message_id")),
+            key=lambda event: int(event["starts_at"]),
+        )
+        if not drafts:
+            await interaction.response.send_message("No unposted drafts. Press **Create Event** to start one.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"{len(drafts)} unposted draft(s):", view=DraftPickerView(self, interaction.user.id, drafts), ephemeral=True
+        )
+
+    # ---- posting -------------------------------------------------------------------------------
+
+    async def open_post_menu(self, interaction: discord.Interaction, event_id: int) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        guild, member, _events, event = context
+        if event.get("message_id"):
+            await interaction.response.send_message(
+                f"Event #{event_id} is already posted in <#{event.get('channel_id')}>.", ephemeral=True
+            )
+            return
+        if event["status"] != "draft":
+            await interaction.response.send_message(f"This event is {event['status']}, so it can't be posted.", ephemeral=True)
+            return
+        chosen = guild.get_channel(event.get("post_channel_id")) if event.get("post_channel_id") else None
+        channel = chosen if isinstance(chosen, discord.TextChannel) else await self._announce_destination(guild, interaction.channel)
+        roles = [role for role in (guild.get_role(rid) for rid in event.get("ping_role_ids") or []) if role]
+        await interaction.response.edit_message(
+            content="Choose where to post the event and which roles to ping (optional), then press **Post now**.",
+            embed=None,
+            view=PostEventView(self, member.id, event_id, channel, roles),
+        )
+
+    async def post_from_menu(
+        self, interaction: discord.Interaction, event_id: int, channel_id: int | None, role_ids: list[int]
+    ) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        guild, member, _events, _event = context
+        destination = guild.get_channel(channel_id) if channel_id else None
+        if not isinstance(destination, discord.TextChannel):
+            await interaction.response.send_message("Pick a text channel first.", ephemeral=True)
+            return
+        roles = [role for role in (guild.get_role(rid) for rid in role_ids) if role and not role.is_default()]
+        problem = self._post_problem(guild, member, destination, roles)
+        if problem:
+            await interaction.response.send_message(f"⚠️ {problem} Nothing was posted.", ephemeral=True)
+            return
+        try:
+            message = await self.publish_event(guild, event_id, destination, [role.id for role in roles])
+        except commands.BadArgument as error:
+            await interaction.response.send_message(f"⚠️ {error}", ephemeral=True)
+            return
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Could not post EventCheckin event %s in guild %s.", event_id, guild.id)
+            await interaction.response.send_message(
+                f"⚠️ Discord would not let me post in {destination.mention}. Check my permissions there. Nothing was posted.",
+                ephemeral=True,
+            )
+            return
+        await self._audit(guild, "event posted", "completed", f"Event #{event_id} by {member.id} in {destination.id}")
+        _events, event = await self._event(guild, event_id)
+        pinged = " Pinged " + " ".join(role.mention for role in roles) + "." if roles else ""
+        await interaction.response.edit_message(
+            content=f"✅ Posted in {destination.mention}: {message.jump_url}.{pinged}",
+            embed=self._manage_embed(event),
+            view=EventManageView(self, member.id, event_id),
+        )
+
+    def _post_problem(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        destination: discord.TextChannel,
+        roles: list[discord.Role],
+    ) -> str | None:
+        mine = destination.permissions_for(guild.me)
+        yours = destination.permissions_for(member)
+        if not (mine.view_channel and mine.send_messages and mine.embed_links):
+            return f"I need View Channel, Send Messages and Embed Links in {destination.mention}."
+        if not (yours.view_channel and yours.send_messages):
+            return f"You can't post in {destination.mention}, so I won't post there for you."
+        blocked = [role for role in roles if not role.mentionable]
+        if blocked and not mine.mention_everyone:
+            names = ", ".join(f"**{discord.utils.escape_markdown(role.name)}**" for role in blocked)
+            return f"I can't ping {names} (not mentionable, and I lack Mention Everyone in {destination.mention})."
+        return None
+
+    async def publish_event(
+        self,
+        guild: discord.Guild,
+        event_id: int,
+        destination: discord.TextChannel,
+        ping_role_ids: list[int] | None = None,
+    ) -> discord.Message:
+        """Post (or re-post) an event's registration panel and open registration."""
+        async with self._lock(guild.id):
+            events, event = await self._event(guild, event_id)
+            if event.get("message_id") and event["status"] != "draft":
+                raise commands.BadArgument(f"Event #{event_id} is already posted.")
+            if event["status"] in {"finalized", "cancelled"}:
+                raise commands.BadArgument(f"Event #{event_id} is {event['status']}.")
+            if ping_role_ids is not None:
+                event["ping_role_ids"] = [int(rid) for rid in ping_role_ids][:MAX_PING_ROLES]
+            roles = [role for role in (guild.get_role(rid) for rid in event.get("ping_role_ids") or []) if role and not role.is_default()]
+            preview = {**event, "status": "open"}
+            message = await destination.send(
+                content=" ".join(role.mention for role in roles) or None,
+                embed=self._embed(preview),
+                view=EventControls(self, preview),
+                allowed_mentions=discord.AllowedMentions(roles=roles, users=False, everyone=False),
+            )
+            event.update(status="open", channel_id=destination.id, message_id=message.id, post_channel_id=destination.id)
+            await self._save(guild, events, event)
+            return message
 
     async def open_manage_menu(self, interaction: discord.Interaction) -> None:
         context = await self._staff_event(interaction)
@@ -1998,6 +2220,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         if event["status"] in {"finalized", "cancelled"}:
             await interaction.response.send_message(f"This event is already {event['status']}.", ephemeral=True)
             return
+        if event["status"] == "draft":
+            await interaction.response.send_message("Post the event first; a draft has nothing to finalize.", ephemeral=True)
+            return
         records = list(event.get("attendees", {}).values())
         arrived = sum(bool(record.get("checked_in_at")) for record in records)
         no_shows = sum(record.get("status") == "going" and not record.get("checked_in_at") for record in records)
@@ -2306,15 +2531,17 @@ class EventCheckin(DashboardIntegration, commands.Cog):
     @commands.admin_or_permissions(manage_events=True)
     async def post(self, ctx: commands.Context, event_id: int, channel: discord.TextChannel | None = None) -> None:
         """Post or move an event registration panel."""
+        _events, event = await self._event(ctx.guild, event_id)
+        if channel is None and event.get("post_channel_id"):
+            channel = ctx.guild.get_channel(event["post_channel_id"])
         destination = channel or ctx.channel
         if not isinstance(destination, discord.TextChannel):
             raise commands.BadArgument("Choose a text channel.")
-        events, event = await self._event(ctx.guild, event_id)
-        event["status"] = "open"
-        message = await destination.send(embed=self._embed(event), view=EventControls(self, event))
-        event["channel_id"] = destination.id
-        event["message_id"] = message.id
-        await self._save(ctx.guild, events, event)
+        roles = [role for role in (ctx.guild.get_role(rid) for rid in event.get("ping_role_ids") or []) if role]
+        problem = self._post_problem(ctx.guild, ctx.author, destination, roles)
+        if problem:
+            raise commands.BadArgument(problem)
+        message = await self.publish_event(ctx.guild, event_id, destination)
         await ctx.send(f"Event panel posted: {message.jump_url}")
 
     @event_checkin.command(name="repeat")
@@ -2446,7 +2673,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         embed = discord.Embed(
             title="📅 Create an event",
             description=(
-                "Click **Create Event**, fill in the form, and the event is posted with RSVP and check-in buttons.\n"
+                "Click **Create Event** and fill in the form. The event is saved as a draft: edit it, then post it with **Post to channel** when it's ready. **Drafts** reopens unposted events.\n"
                 "Only members with **Manage Events** can create events."
             ),
             color=self.COLOR,

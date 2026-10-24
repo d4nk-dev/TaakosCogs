@@ -18,7 +18,7 @@ The bot needs View Channel, Send Messages and Embed Links in those channels.
 
 ## Creating an event
 
-Anyone with **Manage Events** clicks **Create Event**. A private step first asks which channel to post in (and, if you have saved templates, which template to start from, or *Blank event*); press **Continue**. The form asks for the title, start time, length, max attendees and location, then the event is posted with RSVP, Withdraw, Check in and Manage buttons.
+Anyone with **Manage Events** clicks **Create Event**. A private step first asks which channel to post in (and, if you have saved templates, which template to start from, or *Blank event*); press **Continue**. The form asks for the title, start time, length, max attendees and location, then the event is saved as a **draft** (nothing is posted). Use the Manage menu to finish it, then **Post to channel**: choose the channel, optionally pick roles to ping, and press **Post now**. The post has RSVP, Withdraw, Check in and Manage buttons. The panel's **Drafts** button reopens any unposted event.
 
 - Start times: `2026-11-05 19:30`, `5 Nov 7:30pm`, `tomorrow 8pm`, `fri 19:00`.
 - Lengths: `90`, `1h30m`, `2 hours`.
@@ -35,6 +35,7 @@ Every event post has a **Manage** button that only staff can use. You also get t
 | Image | Set a banner from a link to an externally hosted image. **Remove image** clears it |
 | Requirements | Up to 10 confirmations (one per line). Members must press each one before they can RSVP and again before checking in |
 | Roles | Up to 10 roles (Tank / Healer / DPS, Driver / Navigator...), each with its own slots and up to 5 requirements |
+| Post to channel | Choose the channel and roles to ping, then publish the draft |
 | Save as template | Saves the setup (including requirements, roles and image link) for the Create Event dropdown. 25 per server |
 | Add to Discord events | Creates a native scheduled event (needs a location) |
 | Attendees | Private list grouped by status, with roles |

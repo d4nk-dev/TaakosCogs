@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.0
+
+- **Drafts first.** Creating an event no longer posts anything. It saves a draft and opens the private Manage menu, so you can set the details, image, requirements and roles before anyone sees it.
+- **Post to channel** button in the Manage menu: pick the channel (defaults to the one chosen when creating) and, optionally, up to 10 roles to ping, then press **Post now**. The roles are mentioned above the event post; nothing else can be pinged. The bot refuses (and tells you) if the channel is off limits to you or the bot, or if a role isn't mentionable and the bot lacks Mention Everyone.
+- **Drafts** button on the Create Event panel lists unposted events (including ones from DecisionLedger) so you can come back to them. Existing panels pick the new button up when you re-run `panel`.
+- Drafts can't be finalized, and an event can only be posted once. The `post` command still works and uses the draft's chosen channel and pings.
+
 ## 1.8.0
 
 - **Guided RSVP.** Pressing **RSVP** now walks the member through a private flow: (1) tick the event's requirements and press Continue, (2) pick a role, (3) tick that role's requirements and confirm. Events without roles skip steps 2 and 3. Nobody is signed up until the last step. Confirmations are remembered, so withdrawing and re-RSVPing, or switching roles, does not repeat step 1.
