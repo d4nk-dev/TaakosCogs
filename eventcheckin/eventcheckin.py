@@ -734,6 +734,7 @@ class EventManageView(discord.ui.View):
         await interaction.response.send_message("These buttons are for the staff member who opened them.", ephemeral=True)
         return False
 
+    # Row 0: what the event is
     @discord.ui.button(label="Edit details", emoji="📝", style=discord.ButtonStyle.secondary, row=0)
     async def edit(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_edit_modal(interaction, self.event_id)
@@ -741,6 +742,10 @@ class EventManageView(discord.ui.View):
     @discord.ui.button(label="Image", emoji="🖼️", style=discord.ButtonStyle.secondary, row=0)
     async def image(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_image_modal(interaction, self.event_id)
+
+    @discord.ui.button(label="Remove image", emoji="🗑️", style=discord.ButtonStyle.secondary, row=0)
+    async def remove_image(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.handle_remove_image(interaction, self.event_id)
 
     @discord.ui.button(label="Requirements", emoji="📋", style=discord.ButtonStyle.secondary, row=0)
     async def requirements(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -750,14 +755,7 @@ class EventManageView(discord.ui.View):
     async def roles(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_roles_editor(interaction, self.event_id)
 
-    @discord.ui.button(label="Start event", emoji="▶️", style=discord.ButtonStyle.primary, row=3)
-    async def start_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self.cog.request_start(interaction, self.event_id)
-
-    @discord.ui.button(label="Post to channel", emoji="📣", style=discord.ButtonStyle.success, row=3)
-    async def post_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self.cog.open_post_menu(interaction, self.event_id)
-
+    # Row 1: extras
     @discord.ui.button(label="Save as template", emoji="💾", style=discord.ButtonStyle.secondary, row=1)
     async def save_template(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.open_save_template_modal(interaction, self.event_id)
@@ -766,9 +764,14 @@ class EventManageView(discord.ui.View):
     async def discord_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.handle_discord_event_button(interaction, self.event_id)
 
-    @discord.ui.button(label="Remove image", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
-    async def remove_image(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self.cog.handle_remove_image(interaction, self.event_id)
+    # Row 2: running the event, in the order it happens
+    @discord.ui.button(label="Post to channel", emoji="📣", style=discord.ButtonStyle.success, row=2)
+    async def post_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.open_post_menu(interaction, self.event_id)
+
+    @discord.ui.button(label="Start event", emoji="▶️", style=discord.ButtonStyle.primary, row=2)
+    async def start_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.request_start(interaction, self.event_id)
 
     @discord.ui.button(label="Attendees", emoji="👥", style=discord.ButtonStyle.secondary, row=2)
     async def attendees(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -1204,16 +1207,66 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         if needs:
             embed.add_field(name="Role requirements (confirmed when you pick the role)", value="\n".join(needs)[:1024], inline=False)
 
-    async def _announce_promotions(self, guild: discord.Guild, event: dict[str, Any], user_ids: list[int]) -> None:
+    GREEN = 0x57F287
+    AMBER = 0xFEE75C
+    RED = 0xED4245
+
+    def _post_link(self, guild: discord.Guild, event: dict[str, Any]) -> str | None:
+        if event.get("channel_id") and event.get("message_id"):
+            return f"https://discord.com/channels/{guild.id}/{event['channel_id']}/{event['message_id']}"
+        return None
+
+    def _notice(
+        self,
+        guild: discord.Guild,
+        event: dict[str, Any],
+        title: str,
+        description: str = "",
+        *,
+        color: int | None = None,
+        fields: list[tuple[str, str]] | None = None,
+    ) -> discord.Embed:
+        """A consistent announcement embed for the event channel."""
+        embed = discord.Embed(
+            title=title[:256], description=description[:4000] or None, color=color or self.COLOR, timestamp=discord.utils.utcnow()
+        )
+        for name, value in fields or []:
+            embed.add_field(name=name, value=str(value)[:1024])
+        link = self._post_link(guild, event)
+        if link:
+            embed.add_field(name="Event post", value=f"[Jump to the event]({link})", inline=False)
+        embed.set_footer(text=f"Event #{event['event_id']}")
+        return embed
+
+    async def _send_notice(
+        self, guild: discord.Guild, event: dict[str, Any], embed: discord.Embed, *, ping: list[int] | None = None
+    ) -> None:
+        """Post an announcement embed in the event channel. Pings go in the message text so they notify."""
         channel = guild.get_channel(event.get("channel_id")) if event.get("channel_id") else None
-        if not user_ids or not isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, discord.TextChannel):
             return
-        mentions = " ".join(f"<@{user_id}>" for user_id in user_ids[:25])
+        content = " ".join(f"<@{user_id}>" for user_id in (ping or [])[:50]) or None
         with suppress(discord.HTTPException):
             await channel.send(
-                f"{mentions} moved up from the waitlist for **{event['title']}**. You're in!",
-                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                content=content,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(users=bool(content), roles=False, everyone=False),
             )
+
+    async def _say(self, ctx: commands.Context, text: str, *, color: int | None = None) -> None:
+        await ctx.send(embed=discord.Embed(description=text, color=color or self.COLOR))
+
+    async def _announce_promotions(self, guild: discord.Guild, event: dict[str, Any], user_ids: list[int]) -> None:
+        if not user_ids:
+            return
+        embed = self._notice(
+            guild,
+            event,
+            "⬆️ Moved up from the waitlist",
+            f"A seat opened up in **{discord.utils.escape_markdown(event['title'])}**. You're in!",
+            color=self.GREEN,
+        )
+        await self._send_notice(guild, event, embed, ping=user_ids[:25])
 
     async def handle_button(self, interaction: discord.Interaction, action: str) -> None:
         if interaction.guild:
@@ -2289,13 +2342,21 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         await self._audit(guild, "event started", "completed", f"Event #{event_id} by {member.id}")
         await interaction.response.edit_message(content="▶️ Event started. Sign-ups are locked.", view=None)
         await self._refresh(guild, event)
-        channel = guild.get_channel(event.get("channel_id"))
-        if isinstance(channel, discord.TextChannel):
-            with suppress(discord.HTTPException):
-                await channel.send(
-                    f"▶️ **{discord.utils.escape_markdown(event['title'])}** has started. Sign-ups are now locked.",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+        counts = self._counts(event)
+        embed = self._notice(
+            guild,
+            event,
+            "▶️ Event started",
+            f"**{discord.utils.escape_markdown(event['title'])}** is underway.",
+            color=self.GREEN,
+            fields=[
+                ("Started", f"<t:{int(event['started_at'])}:R>"),
+                ("Going", str(counts["going"] + counts["checked_in"])),
+                ("Sign-ups", "🔒 Locked"),
+            ],
+        )
+        embed.add_field(name="Check in", value="Already registered? Press **Check in** on the event post.", inline=False)
+        await self._send_notice(guild, event, embed)
 
     async def request_finalize(self, interaction: discord.Interaction, event_id: int) -> None:
         context = await self._staff_event(interaction, event_id)
@@ -2381,6 +2442,21 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             f"Event **#{event_id} {event['title']}** finalized: {checked} checked in, "
             f"{no_shows} no-show(s), {rewards} reward(s), {errors} error(s).",
         )
+        total = checked + no_shows
+        report = self._notice(
+            guild,
+            event,
+            "🏁 Event finalized",
+            f"Thanks for coming to **{discord.utils.escape_markdown(event['title'])}**!",
+            color=self.COLOR,
+            fields=[
+                ("Checked in", str(checked)),
+                ("No-shows", str(no_shows)),
+                ("Attendance", f"{checked / total * 100:.0f}%" if total else "n/a"),
+            ]
+            + ([("Reward role", f"{role.mention} to {rewards} member(s)")] if role else []),
+        )
+        await self._send_notice(guild, event, report)
         return checked, no_shows, rewards, errors
 
     async def open_cancel_modal(self, interaction: discord.Interaction, event_id: int) -> None:
@@ -2422,17 +2498,26 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             if target:
                 with suppress(discord.Forbidden, discord.HTTPException):
                     await target.send(
-                        f"**{event['title']}** in **{guild.name}** was cancelled."
-                        + (f"\nReason: {reason[:500]}" if reason else "")
+                        embed=discord.Embed(
+                            title="🚫 Event cancelled",
+                            description=f"**{discord.utils.escape_markdown(event['title'])}** in **{guild.name}** was cancelled."
+                            + (f"\n\n**Reason:** {reason[:500]}" if reason else ""),
+                            color=self.RED,
+                        )
                     )
                     notified += 1
-        channel = guild.get_channel(event.get("channel_id")) if event.get("channel_id") else None
-        if isinstance(channel, discord.TextChannel):
-            with suppress(discord.HTTPException):
-                await channel.send(
-                    f"**{event['title']}** was cancelled." + (f"\nReason: {reason[:500]}" if reason else ""),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+        await self._send_notice(
+            guild,
+            event,
+            self._notice(
+                guild,
+                event,
+                "🚫 Event cancelled",
+                f"**{discord.utils.escape_markdown(event['title'])}** was cancelled.",
+                color=self.RED,
+                fields=[("Reason", reason[:500])] if reason else None,
+            ),
+        )
         await self._audit(guild, "event cancellation", "completed", f"Event #{event_id}; {notified} DM(s)")
         return notified
 
@@ -2502,14 +2587,23 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                         record["user_id"] for record in event.get("attendees", {}).values() if record.get("status") == "going"
                     ]
                     if isinstance(channel, discord.TextChannel):
-                        mentions = " ".join(f"<@{user_id}>" for user_id in going_ids[:50])
-                        with suppress(discord.HTTPException):
-                            await channel.send(
-                                (
-                                    f"{mentions}\n**{event['title']}** starts "
-                                    f"<t:{event['starts_at']}:R>. Check in from the event panel."
-                                ).strip()
-                            )
+                        counts = self._counts(event)
+                        fields = [
+                            ("Starts", f"<t:{event['starts_at']}:F>\n<t:{event['starts_at']}:R>"),
+                            ("Going", str(counts["going"] + counts["checked_in"])),
+                        ]
+                        if event.get("location"):
+                            fields.append(("Location", event["location"][:300]))
+                        embed = self._notice(
+                            guild,
+                            event,
+                            "⏰ Starting soon",
+                            f"**{discord.utils.escape_markdown(event['title'])}** starts <t:{event['starts_at']}:R>.",
+                            color=self.AMBER,
+                            fields=fields,
+                        )
+                        embed.add_field(name="Check in", value="Press **Check in** on the event post when it opens.", inline=False)
+                        await self._send_notice(guild, event, embed, ping=going_ids)
                     event["reminder_sent_at"] = now
                     changed = True
             if changed:
@@ -2610,7 +2704,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         if timezone_name is not None:
             await conf.timezone.set(timezone_name)
         current = await conf.timezone()
-        await ctx.send(f"EventCheckin logs use {destination.mention}; event times are entered in `{current}`.")
+        await self._say(ctx, f"EventCheckin logs use {destination.mention}; event times are entered in `{current}`.")
 
     @event_checkin.command(name="post")
     @commands.admin_or_permissions(manage_events=True)
@@ -2627,7 +2721,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         if problem:
             raise commands.BadArgument(problem)
         message = await self.publish_event(ctx.guild, event_id, destination)
-        await ctx.send(f"Event panel posted: {message.jump_url}")
+        await self._say(ctx, f"Event panel posted: {message.jump_url}")
 
     @event_checkin.command(name="repeat")
     @commands.admin_or_permissions(manage_events=True)
@@ -2671,21 +2765,21 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 next_id += 1
             await conf.events.set(events)
             await conf.next_event_id.set(next_id)
-        await ctx.send(f"Created {len(created)} recurring drafts: {', '.join(f'#{item}' for item in created)}.")
+        await self._say(ctx, f"Created {len(created)} recurring drafts: {', '.join(f'#{item}' for item in created)}.")
 
     @event_checkin.group(name="template", invoke_without_command=True)
     @commands.admin_or_permissions(manage_events=True)
     async def template(self, ctx: commands.Context) -> None:
         """Manage reusable event templates."""
         templates = await self.config.guild(ctx.guild).templates()
-        await ctx.send(", ".join(f"`{name}`" for name in sorted(templates)) or "No event templates are configured.")
+        await self._say(ctx, ", ".join(f"`{name}`" for name in sorted(templates)) or "No event templates are configured.")
 
     @template.command(name="remove")
     async def template_remove(self, ctx: commands.Context, name: str) -> None:
         """Remove a named event template."""
         async with self.config.guild(ctx.guild).templates() as templates:
             removed = templates.pop(name.casefold(), None)
-        await ctx.send("Template removed." if removed else "Template not found.")
+        await self._say(ctx, "Template removed." if removed else "Template not found.")
 
     @event_checkin.command(name="calendar")
     async def calendar(self, ctx: commands.Context, status: str = "all") -> None:
@@ -2766,7 +2860,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         embed.set_footer(text=f"Times you enter use the {timezone_name} timezone.")
         await channel.send(embed=embed, view=EventCreatePanel(self))
         if channel.id != ctx.channel.id:
-            await ctx.send(f"Create Event panel posted in {channel.mention}.")
+            await self._say(ctx, f"Create Event panel posted in {channel.mention}.")
 
     @event_checkin.command(name="channel")
     @commands.admin_or_permissions(manage_events=True)
@@ -2778,9 +2872,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 raise commands.BadArgument(f"I need View Channel, Send Messages and Embed Links in {channel.mention}.")
         await self.config.guild(ctx.guild).announce_channel_id.set(channel.id if channel else None)
         if channel:
-            await ctx.send(f"New events will be posted in {channel.mention}.")
+            await self._say(ctx, f"New events will be posted in {channel.mention}.")
         else:
-            await ctx.send("New events will be posted in the channel where the form is opened.")
+            await self._say(ctx, "New events will be posted in the channel where the form is opened.")
 
     @event_checkin.command(name="rewardrole")
     @commands.admin_or_permissions(manage_roles=True)
@@ -2791,7 +2885,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         events, event = await self._event(ctx.guild, event_id)
         event["reward_role_id"] = role.id if role else None
         await self._save(ctx.guild, events, event)
-        await ctx.send(f"Reward role set to {role.mention}." if role else "Reward role cleared.")
+        await self._say(ctx, f"Reward role set to {role.mention}." if role else "Reward role cleared.")
 
     @event_checkin.command(name="checkin")
     @commands.admin_or_permissions(manage_events=True)
@@ -2805,7 +2899,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         record.update(status="checked_in", checked_in_at=self._now(), staff_actor_id=ctx.author.id)
         await self._save(ctx.guild, events, event)
         await self._refresh(ctx.guild, event)
-        await ctx.send(f"Checked in {member.mention}.")
+        await self._say(ctx, f"Checked in {member.mention}.")
 
     @event_checkin.command(name="list")
     async def list_events(self, ctx: commands.Context, status: str = "open") -> None:

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.11.0
+
+- **Every announcement is an embed** now, so the event channel stays tidy: *Starting soon* countdown (amber, with start time, going count and location), *Event started* (green), *Event cancelled* (red, with the reason), *Moved up from the waitlist*, and a new *Event finalized* report (checked in, no-shows, attendance %, reward role). Pings still notify because they sit in the message text above the embed. Each embed links back to the event post. Cancellation DMs and command replies (`setup`, `channel`, `panel`, `checkin`, ...) are embeds too.
+- **Cleaner Manage menu.** Row 1 is about the event (Edit details, Image, Remove image, Requirements, Roles). Row 2 is extras (Save as template, Add to Discord events). Row 3 follows the event's life in order: Post to channel, Start event, Attendees, Finalize, Cancel event. The event post keeps RSVP, Withdraw, Check in, Manage.
+
 ## 1.10.0
 
 - **Start event** button in the Manage menu (asks for confirmation). It locks sign-ups, marks the event as started and tells the event channel. After that the RSVP button is switched off and new RSVPs, role changes and stale RSVP prompts are refused. Members who already RSVPed can still check in (check-in opens as soon as you press Start, even if the scheduled time hasn't arrived) or withdraw, and waitlisted members can still be promoted if a seat opens. Reminders stop once started. Finalize works as before.
