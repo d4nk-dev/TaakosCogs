@@ -52,19 +52,20 @@ def add_text_field(
 
 
 class EventControls(discord.ui.View):
-    """Persistent controls on an event post: RSVP, Withdraw, Check in, Manage, plus requirement buttons.
+    """Persistent controls on an event post: RSVP, Withdraw, Check in, Manage.
 
-    Requirement buttons use fixed slots (custom_id ``eventcheckin:req:<1-10>``), so one registered
-    view can answer every event's buttons even after a restart.
+    Requirements are confirmed inside the private RSVP walkthrough, so new posts carry no requirement
+    buttons. The registration copy still knows the old fixed slots (``eventcheckin:req:<1-10>``) so
+    posts made by earlier versions keep working after a restart.
     """
 
     def __init__(self, cog: EventCheckin, event: dict[str, Any] | None = None) -> None:
         super().__init__(timeout=None)
         self.cog = cog
-        if event is None:  # the registration copy: every slot, so every custom_id is known
+        if event is None:  # the registration copy: every legacy slot, so every custom_id is known
             requirements = [{"id": slot, "text": f"Requirement {slot}"} for slot in range(1, MAX_REQUIREMENTS + 1)]
         else:
-            requirements = cog._requirements(event)
+            requirements = []
         for position, requirement in enumerate(requirements[:MAX_REQUIREMENTS]):
             slot = int(requirement["id"])
             button = discord.ui.Button(
@@ -131,11 +132,13 @@ class CreateEventModal(discord.ui.Modal):
         timezone_name: str,
         defaults: dict[str, str] | None = None,
         template_key: str | None = None,
+        channel_id: int | None = None,
     ) -> None:
         super().__init__(title="Create Event", timeout=900)
         self.cog = cog
         self.timezone_name = timezone_name
         self.template_key = template_key
+        self.channel_id = channel_id
         defaults = defaults or {}
         self.name_input = add_text_field(
             self,
@@ -188,6 +191,7 @@ class CreateEventModal(discord.ui.Modal):
                 "capacity": str(self.capacity_input.value or ""),
                 "location": str(self.location_input.value or ""),
                 "template": self.template_key or "",
+                "channel_id": str(self.channel_id or ""),
             },
         )
 
@@ -258,7 +262,13 @@ class RetryCreateView(discord.ui.View):
     @discord.ui.button(label="Fix and try again", emoji="✏️", style=discord.ButtonStyle.primary)
     async def retry(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.send_modal(
-            CreateEventModal(self.cog, self.timezone_name, self.values, self.values.get("template") or None)
+            CreateEventModal(
+                self.cog,
+                self.timezone_name,
+                self.values,
+                self.values.get("template") or None,
+                int(self.values["channel_id"]) if str(self.values.get("channel_id") or "").isdigit() else None,
+            )
         )
 
 
@@ -273,7 +283,7 @@ class EditRequirementsModal(discord.ui.Modal):
         self.requirements_input = add_text_field(
             self,
             "Requirements (one per line)",
-            hint=f"Members must press each one, then RSVP. Up to {MAX_REQUIREMENTS}. Empty removes them all.",
+            hint=f"Members tick each one when they RSVP. Up to {MAX_REQUIREMENTS}. Empty removes them all.",
             style=discord.TextStyle.paragraph,
             default=current or None,
             placeholder="I have read the rules\nI can stay for the whole session",
@@ -335,26 +345,51 @@ class SaveTemplateModal(discord.ui.Modal):
         await self.cog.handle_modal_error(interaction, error)
 
 
-class TemplatePickerView(discord.ui.View):
-    """Dropdown of saved templates shown before the create form."""
+class CreateStartView(discord.ui.View):
+    """Step before the create form: choose where the event is posted and (optionally) a template."""
 
-    def __init__(self, cog: EventCheckin, actor_id: int, templates: dict[str, Any]) -> None:
-        super().__init__(timeout=300)
+    def __init__(
+        self,
+        cog: EventCheckin,
+        actor_id: int,
+        templates: dict[str, Any],
+        default_channel: discord.TextChannel | None,
+    ) -> None:
+        super().__init__(timeout=600)
         self.cog = cog
         self.actor_id = actor_id
-        options = []
-        for key, template in sorted(templates.items())[:25]:
-            minutes = int(template.get("duration_minutes") or 60)
-            capacity = int(template.get("capacity") or 0)
-            detail = f"{template.get('title', '')} - {minutes} min - {capacity if capacity else 'no limit'}"
-            options.append(
-                discord.SelectOption(
-                    label=str(template.get("name") or key)[:100], value=key[:100], description=detail[:100]
+        self.channel_id: int | None = default_channel.id if default_channel else None
+        self.template_key: str | None = None
+        kwargs: dict[str, Any] = {}
+        if default_channel is not None:
+            kwargs["default_values"] = [discord.SelectDefaultValue.from_channel(default_channel)]
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder="Post the event in which channel?",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+            **kwargs,
+        )
+        self.channel_select.callback = self._channel_picked
+        self.add_item(self.channel_select)
+        self.template_select: discord.ui.Select | None = None
+        if templates:
+            options = [discord.SelectOption(label="Blank event", value="__blank__", description="Start from scratch", emoji="✨")]
+            for key, template in sorted(templates.items())[:24]:
+                minutes = int(template.get("duration_minutes") or 60)
+                capacity = int(template.get("capacity") or 0)
+                detail = f"{template.get('title', '')} - {minutes} min - {capacity if capacity else 'no limit'}"
+                options.append(
+                    discord.SelectOption(
+                        label=str(template.get("name") or key)[:100], value=key[:100], description=detail[:100]
+                    )
                 )
+            self.template_select = discord.ui.Select(
+                placeholder="Start from a saved template (optional)...", options=options, min_values=1, max_values=1, row=1
             )
-        self.select = discord.ui.Select(placeholder="Start from a saved template...", options=options)
-        self.select.callback = self._picked
-        self.add_item(self.select)
+            self.template_select.callback = self._template_picked
+            self.add_item(self.template_select)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.actor_id:
@@ -362,12 +397,17 @@ class TemplatePickerView(discord.ui.View):
         await interaction.response.send_message("This prompt is not for you.", ephemeral=True)
         return False
 
-    async def _picked(self, interaction: discord.Interaction) -> None:
-        await self.cog.open_template_modal(interaction, self.select.values[0])
+    async def _channel_picked(self, interaction: discord.Interaction) -> None:
+        self.channel_id = int(self.channel_select.values[0].id)
+        await interaction.response.defer()
 
-    @discord.ui.button(label="Start blank", emoji="✨", style=discord.ButtonStyle.primary)
-    async def blank(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self.cog.open_template_modal(interaction, None)
+    async def _template_picked(self, interaction: discord.Interaction) -> None:
+        self.template_key = None if self.template_select.values[0] == "__blank__" else self.template_select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Continue", emoji="➡️", style=discord.ButtonStyle.primary, row=2)
+    async def proceed(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.open_template_modal(interaction, self.template_key, self.channel_id)
 
 
 class RoleModal(discord.ui.Modal):
@@ -476,6 +516,64 @@ class RolesEditorView(discord.ui.View):
         await self.cog.handle_role_remove(interaction, self.event_id, role_id)
 
 
+class EventRequirementsView(discord.ui.View):
+    """Step 1 of the RSVP walkthrough: tick every event-wide requirement, then continue."""
+
+    def __init__(self, cog: EventCheckin, user_id: int, event: dict[str, Any]) -> None:
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.user_id = user_id
+        self.event_id = int(event["event_id"])
+        items = cog._requirements(event)[:MAX_REQUIREMENTS]
+        self.ids = [int(item["id"]) for item in items]
+        self.texts = [str(item["text"]) for item in items]
+        self.confirmed: set[int] = set()
+        self.buttons: list[discord.ui.Button] = []
+        for index in range(len(self.texts)):
+            button = discord.ui.Button(label=self._label(index), style=discord.ButtonStyle.secondary, row=index // 3)
+            button.callback = self._make_toggle(index)
+            self.buttons.append(button)
+            self.add_item(button)
+        self.continue_button = discord.ui.Button(
+            label="Continue", emoji="➡️", style=discord.ButtonStyle.success, row=4, disabled=bool(self.texts)
+        )
+        self.continue_button.callback = self._continue
+        self.add_item(self.continue_button)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, row=4)
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    def _label(self, index: int) -> str:
+        mark = "✅" if index in self.confirmed else "☐"
+        return f"{mark} {self.texts[index]}"[:80]
+
+    def _make_toggle(self, index: int):
+        async def toggle(interaction: discord.Interaction) -> None:
+            self.confirmed ^= {index}
+            button = self.buttons[index]
+            button.label = self._label(index)
+            button.style = discord.ButtonStyle.success if index in self.confirmed else discord.ButtonStyle.secondary
+            self.continue_button.disabled = len(self.confirmed) < len(self.texts)
+            await interaction.response.edit_message(view=self)
+
+        return toggle
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("This prompt is not for you.", ephemeral=True)
+        return False
+
+    async def _continue(self, interaction: discord.Interaction) -> None:
+        if len(self.confirmed) < len(self.texts):
+            await interaction.response.send_message("Tick every requirement first.", ephemeral=True)
+            return
+        await self.cog.complete_event_requirements(interaction, self.event_id, self.ids)
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(content="Cancelled. You were not signed up.", embed=None, view=None)
+
+
 class RolePickerView(discord.ui.View):
     """Member: choose which role to sign up for (private, shown after pressing RSVP)."""
 
@@ -565,6 +663,55 @@ class RoleRequirementsView(discord.ui.View):
         await interaction.response.edit_message(content="Cancelled. You were not signed up.", embed=None, view=None)
 
 
+class ConfirmActionView(discord.ui.View):
+    """A private "are you sure?" step in front of an action that can't be undone."""
+
+    def __init__(self, actor_id: int, action, *, confirm_label: str, confirm_style: discord.ButtonStyle) -> None:
+        super().__init__(timeout=120)
+        self.actor_id = actor_id
+        self.action = action
+        self.confirm.label = confirm_label
+        self.confirm.style = confirm_style
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.actor_id:
+            return True
+        await interaction.response.send_message("This prompt is not for you.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.action(interaction)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="Nothing was changed.", view=None)
+
+
+class CancelEventModal(discord.ui.Modal):
+    """Ask for an optional reason, then cancel the event and tell everyone who registered."""
+
+    def __init__(self, cog: EventCheckin, event: dict[str, Any]) -> None:
+        super().__init__(title=f"Cancel Event #{event['event_id']}"[:45], timeout=900)
+        self.cog = cog
+        self.event_id = int(event["event_id"])
+        self.reason_input = add_text_field(
+            self,
+            "Reason (optional)",
+            hint="Submitting cancels the event and sends this to everyone who registered.",
+            style=discord.TextStyle.paragraph,
+            placeholder="Why is it cancelled? Will it be rescheduled?",
+            required=False,
+            max_length=500,
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.handle_cancel_submit(interaction, self.event_id, str(self.reason_input.value or ""))
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        await self.cog.handle_modal_error(interaction, error)
+
+
 class EventManageView(discord.ui.View):
     """Private staff menu for one event; opened by the Manage button or right after creating."""
 
@@ -607,6 +754,18 @@ class EventManageView(discord.ui.View):
     @discord.ui.button(label="Remove image", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
     async def remove_image(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.handle_remove_image(interaction, self.event_id)
+
+    @discord.ui.button(label="Attendees", emoji="👥", style=discord.ButtonStyle.secondary, row=2)
+    async def attendees(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.show_attendees(interaction, self.event_id)
+
+    @discord.ui.button(label="Finalize", emoji="🏁", style=discord.ButtonStyle.primary, row=2)
+    async def finalize(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.request_finalize(interaction, self.event_id)
+
+    @discord.ui.button(label="Cancel event", emoji="🚫", style=discord.ButtonStyle.danger, row=2)
+    async def cancel_event(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog.open_cancel_modal(interaction, self.event_id)
 
 
 class EventCheckin(DashboardIntegration, commands.Cog):
@@ -730,7 +889,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             embed.add_field(name="Location", value=event["location"], inline=False)
         if requirements:
             embed.add_field(
-                name="Requirements (press each button, then RSVP)",
+                name="Requirements (you confirm these when you RSVP)",
                 value="\n".join(f"• {item['text']}" for item in requirements)[:1024],
                 inline=False,
             )
@@ -982,12 +1141,12 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             if current and current.get("status") == "checked_in":
                 await interaction.response.send_message("You are already checked in.", ephemeral=True)
                 return
-            if missing and not (current and current.get("status") in {"going", "waitlist"}):
+            if missing:
                 await interaction.response.send_message(
-                    "Before you RSVP, press these requirement buttons to confirm them:\n"
-                    + self._missing_text(missing),
+                    "**Step 1: event requirements.** Tick each one to confirm it, then press **Continue**."
+                    + (" Next you'll pick your role." if self._roles(event) else ""),
+                    view=EventRequirementsView(self, interaction.user.id, event),
                     ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
             if self._roles(event):
@@ -1030,7 +1189,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             if not current or current.get("status") != "going":
                 response = "You must have a confirmed RSVP before checking in."
             elif missing:
-                response = "Press these requirement buttons before checking in:\n" + self._missing_text(missing)
+                response = "The event requirements changed. Press **RSVP** to confirm these, then check in:\n" + self._missing_text(missing)
             elif not early <= self._now() <= late:
                 response = f"Check-in is available from <t:{early}:F> through <t:{late}:F>."
             else:
@@ -1081,17 +1240,16 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             )
             return
         templates = await self.config.guild(interaction.guild).templates()
-        if templates:
-            await interaction.response.send_message(
-                "Pick a saved template to start from, or start with a blank event.",
-                view=TemplatePickerView(self, interaction.user.id, templates),
-                ephemeral=True,
-            )
-            return
-        timezone_name, _zone = await self._guild_zone(interaction.guild)
-        await interaction.response.send_modal(CreateEventModal(self, timezone_name))
+        default = await self._announce_destination(interaction.guild, interaction.channel)
+        text = "Choose the channel the event will be posted in"
+        text += ", and optionally a saved template, then press **Continue**." if templates else ", then press **Continue**."
+        await interaction.response.send_message(
+            text, view=CreateStartView(self, interaction.user.id, templates, default), ephemeral=True
+        )
 
-    async def open_template_modal(self, interaction: discord.Interaction, key: str | None) -> None:
+    async def open_template_modal(
+        self, interaction: discord.Interaction, key: str | None, channel_id: int | None = None
+    ) -> None:
         """Open the create form, prefilled from a template (or blank when ``key`` is None)."""
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return
@@ -1112,7 +1270,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 "location": str(template.get("location", ""))[:500],
             }
         timezone_name, _zone = await self._guild_zone(interaction.guild)
-        await interaction.response.send_modal(CreateEventModal(self, timezone_name, defaults, key))
+        await interaction.response.send_modal(CreateEventModal(self, timezone_name, defaults, key, channel_id))
 
     async def handle_create_submit(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
         guild = interaction.guild
@@ -1139,16 +1297,22 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             )
             return
 
-        destination = await self._announce_destination(guild, interaction.channel)
+        chosen = str(values.get("channel_id") or "")
+        destination = guild.get_channel(int(chosen)) if chosen.isdigit() else None
+        if not isinstance(destination, discord.TextChannel):
+            destination = await self._announce_destination(guild, interaction.channel)
         problem = None
         if destination is None:
             problem = "I could not find a text channel to post in."
         else:
             perms = destination.permissions_for(guild.me)
+            mine = destination.permissions_for(member)
             if not (perms.view_channel and perms.send_messages and perms.embed_links):
                 problem = f"I need View Channel, Send Messages and Embed Links in {destination.mention}."
+            elif not (mine.view_channel and mine.send_messages):
+                problem = f"You can't post in {destination.mention}, so I won't post there for you."
         if problem:
-            await interaction.response.send_message(f"⚠️ {problem} Nothing was created.", ephemeral=True)
+            await interaction.response.send_message(f"⚠️ {problem} Nothing was created.", view=retry, ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -1356,7 +1520,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             await self._save(guild, events, event)
         await interaction.response.send_message(
             f"Requirements updated: **{count}** on event #{event_id}."
-            + (" Members must press each one, then RSVP." if count else " RSVP no longer needs confirmations."),
+            + (" Members confirm each one when they press RSVP." if count else " RSVP no longer needs confirmations."),
             ephemeral=True,
         )
         await self._refresh(guild, event)
@@ -1604,6 +1768,97 @@ class EventCheckin(DashboardIntegration, commands.Cog):
 
     # ---- roles: member sign-up ----------------------------------------------------------------
 
+    async def complete_event_requirements(
+        self, interaction: discord.Interaction, event_id: int, shown_ids: list[int]
+    ) -> None:
+        """Record the member's event-requirement confirmations, then continue to roles or sign them up."""
+        guild = interaction.guild
+        member = interaction.user
+        if not guild or not isinstance(member, discord.Member):
+            return
+        async with self._lock(guild.id):
+            try:
+                events, event = await self._event(guild, event_id)
+            except commands.BadArgument:
+                await interaction.response.edit_message(content="That event no longer exists.", view=None)
+                return
+            if event["status"] != "open":
+                await interaction.response.edit_message(content="Registration for this event is closed.", view=None)
+                return
+            current_ids = [int(item["id"]) for item in self._requirements(event)]
+            if set(current_ids) - set(shown_ids):
+                await interaction.response.edit_message(
+                    content="The requirements changed while you were reading. Please tick the updated list:",
+                    view=EventRequirementsView(self, member.id, event),
+                )
+                return
+            confirmed = event.setdefault("acks", {}).setdefault(str(member.id), [])
+            for slot in current_ids:
+                if slot not in confirmed:
+                    confirmed.append(slot)
+            await self._save(guild, events, event)
+            current = event.get("attendees", {}).get(str(member.id)) or {}
+            status = current.get("status")
+            has_roles = bool(self._roles(event))
+            view = RolePickerView(self, member.id, event) if has_roles else None
+        if status == "checked_in":
+            await interaction.response.edit_message(content="✅ Confirmed. You are already checked in.", view=None)
+            return
+        if has_roles:
+            held = self._role(event, current.get("role_id"))
+            if held and status in {"going", "waitlist"}:
+                text = f"✅ Requirements confirmed. You are **{discord.utils.escape_markdown(held['name'])}**. Pick a different role to switch."
+            else:
+                text = "✅ Requirements confirmed.\n**Step 2: pick the role you want to play.**"
+            await interaction.response.edit_message(content=text, view=view)
+            return
+        if status in {"going", "waitlist"}:
+            await interaction.response.edit_message(content="✅ Requirements confirmed. You are already registered.", view=None)
+            return
+        await self.complete_plain_signup(interaction, event_id)
+
+    async def complete_plain_signup(self, interaction: discord.Interaction, event_id: int) -> None:
+        """Sign a member up for an event that has no roles (last step of the walkthrough)."""
+        guild = interaction.guild
+        member = interaction.user
+        if not guild or not isinstance(member, discord.Member):
+            return
+        async with self._lock(guild.id):
+            try:
+                events, event = await self._event(guild, event_id)
+            except commands.BadArgument:
+                await interaction.response.edit_message(content="That event no longer exists.", view=None)
+                return
+            if event["status"] != "open":
+                await interaction.response.edit_message(content="Registration for this event is closed.", view=None)
+                return
+            if self._missing_requirements(event, member.id):
+                await interaction.response.edit_message(
+                    content="The event requirements changed. Press **RSVP** again to confirm them.", view=None
+                )
+                return
+            attendees = event.setdefault("attendees", {})
+            current = attendees.get(str(member.id))
+            if current and current.get("status") in {"going", "waitlist", "checked_in"}:
+                await interaction.response.edit_message(content="You are already registered.", view=None)
+                return
+            going = sum(record.get("status") in {"going", "checked_in"} for record in attendees.values())
+            capacity = int(event.get("capacity") or 0)
+            status = "waitlist" if capacity and going >= capacity else "going"
+            now = self._now()
+            attendees[str(member.id)] = {
+                "user_id": member.id,
+                "status": status,
+                "registered_at": current.get("registered_at", now) if current else now,
+                "checked_in_at": None,
+                "promoted_at": current.get("promoted_at") if current else None,
+                "staff_actor_id": None,
+            }
+            await self._save(guild, events, event)
+        text = "✅ Requirements confirmed. You are registered." if status == "going" else "✅ Requirements confirmed. The event is full; you joined the waitlist."
+        await interaction.response.edit_message(content=text, view=None)
+        await self._refresh(guild, event)
+
     async def handle_role_pick(self, interaction: discord.Interaction, event_id: int, role_id: int) -> None:
         guild = interaction.guild
         if not guild or not isinstance(interaction.user, discord.Member):
@@ -1652,7 +1907,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 return
             missing = self._missing_requirements(event, member.id)
             if missing:
-                await reply("Press these event requirement buttons first, then RSVP again:\n" + self._missing_text(missing))
+                await reply("The event requirements changed. Press **RSVP** again to confirm them first.")
                 return
             attendees = event.setdefault("attendees", {})
             key = str(member.id)
@@ -1702,6 +1957,174 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         await reply(text)
         await self._refresh(guild, event)
         await self._announce_promotions(guild, event, promoted)
+
+    # ---- Manage menu: attendees, finalize, cancel ------------------------------------------------
+
+    def _attendees_embed(self, event: dict[str, Any]) -> discord.Embed:
+        embed = discord.Embed(title=f"Attendees - {event['title']}"[:256], color=self.COLOR)
+        attendees = sorted(event.get("attendees", {}).values(), key=lambda record: record.get("registered_at", 0))
+        for status, title in (
+            ("checked_in", "📍 Checked in"),
+            ("going", "✅ Going"),
+            ("waitlist", "⏳ Waiting"),
+            ("no_show", "❌ No-show"),
+        ):
+            rows = [record for record in attendees if record.get("status") == status]
+            if not rows:
+                continue
+            lines = []
+            for record in rows[:25]:
+                role = self._role(event, record.get("role_id"))
+                lines.append(f"<@{record['user_id']}>" + (f" - {role['name']}" if role else ""))
+            if len(rows) > 25:
+                lines.append(f"+{len(rows) - 25} more (use the export command for the full list)")
+            embed.add_field(name=f"{title} ({len(rows)})", value="\n".join(lines)[:1024], inline=False)
+        if not embed.fields:
+            embed.description = "Nobody has registered yet."
+        return embed
+
+    async def show_attendees(self, interaction: discord.Interaction, event_id: int) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is not None:
+            await interaction.response.send_message(
+                embed=self._attendees_embed(context[3]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            )
+
+    async def request_finalize(self, interaction: discord.Interaction, event_id: int) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        guild, member, _events, event = context
+        if event["status"] in {"finalized", "cancelled"}:
+            await interaction.response.send_message(f"This event is already {event['status']}.", ephemeral=True)
+            return
+        records = list(event.get("attendees", {}).values())
+        arrived = sum(bool(record.get("checked_in_at")) for record in records)
+        no_shows = sum(record.get("status") == "going" and not record.get("checked_in_at") for record in records)
+        role = guild.get_role(event["reward_role_id"]) if event.get("reward_role_id") else None
+        reward = f"{arrived} checked-in member(s) receive {role.mention}" if role else "no reward role is set"
+        await interaction.response.send_message(
+            f"Finalize **{discord.utils.escape_markdown(event['title'])}**?\n"
+            f"• Registration closes\n• {no_shows} confirmed RSVP(s) who never checked in become no-shows\n• {reward}\n"
+            "This can't be undone.",
+            view=ConfirmActionView(
+                member.id,
+                lambda it: self._run_finalize(it, event_id),
+                confirm_label="Finalize",
+                confirm_style=discord.ButtonStyle.primary,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _run_finalize(self, interaction: discord.Interaction, event_id: int) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        guild, member = context[0], context[1]
+        await interaction.response.defer()
+        try:
+            checked, no_shows, rewards, errors = await self._finalize_event(guild, event_id, member)
+        except commands.BadArgument as error:
+            await interaction.edit_original_response(content=f"⚠️ {error}", view=None)
+            return
+        await interaction.edit_original_response(
+            content=f"🏁 Finalized: **{checked}** checked in, **{no_shows}** no-show(s), "
+            f"**{rewards}** reward role(s) given, **{errors}** error(s).",
+            view=None,
+        )
+
+    async def _finalize_event(
+        self, guild: discord.Guild, event_id: int, actor: discord.abc.User
+    ) -> tuple[int, int, int, int]:
+        """Close registration, mark unarrived RSVPs as no-shows, award the role. Returns the four counts."""
+        checked = no_shows = 0
+        reward_ids: list[int] = []
+        async with self._lock(guild.id):
+            events, event = await self._event(guild, event_id)
+            if event["status"] in {"finalized", "cancelled"}:
+                raise commands.BadArgument(f"This event is already {event['status']}.")
+            for record in event.get("attendees", {}).values():
+                if record.get("checked_in_at"):
+                    record["status"] = "checked_in"
+                    checked += 1
+                    reward_ids.append(record["user_id"])
+                elif record.get("status") == "going":
+                    record["status"] = "no_show"
+                    no_shows += 1
+            event.update(status="finalized", finalized_at=self._now(), finalized_by=actor.id)
+            await self._save(guild, events, event)
+        rewards = errors = 0
+        role = guild.get_role(event["reward_role_id"]) if event.get("reward_role_id") else None
+        if role:  # role changes are slow API calls, so they happen outside the lock
+            for user_id in reward_ids:
+                target = guild.get_member(user_id)
+                if target and role not in target.roles:
+                    try:
+                        await target.add_roles(role, reason=f"EventCheckin event #{event_id} attendance")
+                        rewards += 1
+                    except discord.HTTPException:
+                        errors += 1
+        await self._refresh(guild, event)
+        await self._log(
+            guild,
+            f"Event **#{event_id} {event['title']}** finalized: {checked} checked in, "
+            f"{no_shows} no-show(s), {rewards} reward(s), {errors} error(s).",
+        )
+        return checked, no_shows, rewards, errors
+
+    async def open_cancel_modal(self, interaction: discord.Interaction, event_id: int) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        if context[3]["status"] in {"finalized", "cancelled"}:
+            await interaction.response.send_message(f"This event is already {context[3]['status']}.", ephemeral=True)
+            return
+        await interaction.response.send_modal(CancelEventModal(self, context[3]))
+
+    async def handle_cancel_submit(self, interaction: discord.Interaction, event_id: int, reason: str) -> None:
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
+            return
+        guild, member = context[0], context[1]
+        await interaction.response.defer(ephemeral=True)
+        try:
+            notified = await self._cancel_event(guild, event_id, member, reason.strip())
+        except commands.BadArgument as error:
+            await interaction.followup.send(f"⚠️ {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"🚫 Event **#{event_id}** cancelled. {notified} registered member(s) were notified by DM.", ephemeral=True
+        )
+
+    async def _cancel_event(self, guild: discord.Guild, event_id: int, actor: discord.abc.User, reason: str) -> int:
+        """Cancel without deleting attendance, update the post, tell the channel and DM registrants."""
+        async with self._lock(guild.id):
+            events, event = await self._event(guild, event_id)
+            if event["status"] in {"finalized", "cancelled"}:
+                raise commands.BadArgument(f"This event is already {event['status']}.")
+            event.update(status="cancelled", cancel_reason=reason[:500], finalized_at=self._now(), finalized_by=actor.id)
+            await self._save(guild, events, event)
+        await self._refresh(guild, event)
+        notified = 0
+        for record in list(event.get("attendees", {}).values())[:100]:
+            target = guild.get_member(record.get("user_id"))
+            if target:
+                with suppress(discord.Forbidden, discord.HTTPException):
+                    await target.send(
+                        f"**{event['title']}** in **{guild.name}** was cancelled."
+                        + (f"\nReason: {reason[:500]}" if reason else "")
+                    )
+                    notified += 1
+        channel = guild.get_channel(event.get("channel_id")) if event.get("channel_id") else None
+        if isinstance(channel, discord.TextChannel):
+            with suppress(discord.HTTPException):
+                await channel.send(
+                    f"**{event['title']}** was cancelled." + (f"\nReason: {reason[:500]}" if reason else ""),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        await self._audit(guild, "event cancellation", "completed", f"Event #{event_id}; {notified} DM(s)")
+        return notified
 
     async def handle_discord_event_button(self, interaction: discord.Interaction, event_id: int) -> None:
         guild = interaction.guild
@@ -1852,49 +2275,32 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         self,
         ctx: commands.Context,
         channel: discord.TextChannel | None = None,
-        timezone_name: str = "UTC",
+        timezone_name: str | None = None,
     ) -> None:
-        """Configure the attendance log channel and calendar timezone."""
+        """Set the log channel and the timezone that event times are typed in.
+
+        Example: `[p]eventcheckin setup #event-logs Atlantic/Reykjavik`
+        Leave the timezone off to keep the current one.
+        """
         destination = channel or ctx.channel
         if not isinstance(destination, discord.TextChannel):
             raise commands.BadArgument("Choose a text channel for attendance logs.")
-        try:
-            ZoneInfo(timezone_name)
-        except ZoneInfoNotFoundError as error:
-            raise commands.BadArgument("Unknown IANA timezone name.") from error
+        if timezone_name is not None:
+            try:
+                ZoneInfo(timezone_name)
+            except (ZoneInfoNotFoundError, ValueError) as error:
+                raise commands.BadArgument(
+                    "Unknown timezone. Use a name like `Atlantic/Reykjavik`, `America/Chicago` or `Europe/London`."
+                ) from error
         permissions = destination.permissions_for(ctx.guild.me)
         if not permissions.send_messages or not permissions.embed_links:
             raise commands.BadArgument("I need Send Messages and Embed Links in that channel.")
         conf = self.config.guild(ctx.guild)
         await conf.log_channel_id.set(destination.id)
-        await conf.timezone.set(timezone_name)
-        await ctx.send(f"EventCheckin logs use {destination.mention}; calendar timezone is `{timezone_name}`.")
-
-    @event_checkin.command(name="create")
-    @commands.admin_or_permissions(manage_events=True)
-    async def create(
-        self,
-        ctx: commands.Context,
-        starts_at: int,
-        capacity: commands.Range[int, 0, 10000],
-        title: str,
-        *,
-        description: str = "",
-    ) -> None:
-        """Create an event using a Unix timestamp and capacity (0 = unlimited)."""
-        event = await self.create_draft_service(
-            ctx.guild,
-            actor_id=ctx.author.id,
-            starts_at=starts_at,
-            capacity=int(capacity),
-            title=title,
-            description=description,
-        )
-        event_id = event["event_id"]
-        await ctx.send(
-            f"Created draft event **#{event_id} {event['title']}** for <t:{starts_at}:F>. "
-            f"Use `{ctx.clean_prefix}eventcheckin post {event_id}`."
-        )
+        if timezone_name is not None:
+            await conf.timezone.set(timezone_name)
+        current = await conf.timezone()
+        await ctx.send(f"EventCheckin logs use {destination.mention}; event times are entered in `{current}`.")
 
     @event_checkin.command(name="post")
     @commands.admin_or_permissions(manage_events=True)
@@ -1910,37 +2316,6 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         event["message_id"] = message.id
         await self._save(ctx.guild, events, event)
         await ctx.send(f"Event panel posted: {message.jump_url}")
-
-    @event_checkin.command(name="location")
-    @commands.admin_or_permissions(manage_events=True)
-    async def location(self, ctx: commands.Context, event_id: int, *, location: str) -> None:
-        """Set an event location or joining instruction."""
-        events, event = await self._event(ctx.guild, event_id)
-        event["location"] = location[:500]
-        await self._save(ctx.guild, events, event)
-        await self._refresh(ctx.guild, event)
-        await ctx.send("Event location updated.")
-
-    @event_checkin.command(name="duration")
-    @commands.admin_or_permissions(manage_events=True)
-    async def duration(self, ctx: commands.Context, event_id: int, minutes: commands.Range[int, 1, 10080]) -> None:
-        """Set an event duration in minutes."""
-        events, event = await self._event(ctx.guild, event_id)
-        event["duration_minutes"] = int(minutes)
-        await self._save(ctx.guild, events, event)
-        await self._refresh(ctx.guild, event)
-        await ctx.send(f"Event duration set to {minutes} minutes.")
-
-    @event_checkin.command(name="timezone")
-    @commands.admin_or_permissions(manage_events=True)
-    async def timezone(self, ctx: commands.Context, *, timezone_name: str) -> None:
-        """Set the guild calendar timezone, such as America/Chicago."""
-        try:
-            ZoneInfo(timezone_name)
-        except ZoneInfoNotFoundError as error:
-            raise commands.BadArgument("Unknown IANA timezone name.") from error
-        await self.config.guild(ctx.guild).timezone.set(timezone_name)
-        await ctx.send(f"Event calendar timezone set to `{timezone_name}`.")
 
     @event_checkin.command(name="repeat")
     @commands.admin_or_permissions(manage_events=True)
@@ -1993,46 +2368,12 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         templates = await self.config.guild(ctx.guild).templates()
         await ctx.send(", ".join(f"`{name}`" for name in sorted(templates)) or "No event templates are configured.")
 
-    @template.command(name="save")
-    async def template_save(self, ctx: commands.Context, event_id: int, name: str) -> None:
-        """Save an event's reusable fields as a named template."""
-        _events, event = await self._event(ctx.guild, event_id)
-        key = name.casefold()[:50]
-        if not key:
-            raise commands.BadArgument("A template name is required.")
-        async with self.config.guild(ctx.guild).templates() as templates:
-            if key not in templates and len(templates) >= 25:
-                raise commands.BadArgument("A guild can retain at most 25 event templates.")
-            templates[key] = self._template_from_event(event, name.strip()[:50])
-        await ctx.send(f"Saved event template `{key}`.")
-
     @template.command(name="remove")
     async def template_remove(self, ctx: commands.Context, name: str) -> None:
         """Remove a named event template."""
         async with self.config.guild(ctx.guild).templates() as templates:
             removed = templates.pop(name.casefold(), None)
         await ctx.send("Template removed." if removed else "Template not found.")
-
-    @template.command(name="use")
-    async def template_use(self, ctx: commands.Context, name: str, starts_at: int) -> None:
-        """Create a draft from a named template."""
-        template = (await self.config.guild(ctx.guild).templates()).get(name.casefold())
-        if not template:
-            raise commands.BadArgument("Template not found.")
-        event = await self.create_draft_service(
-            ctx.guild,
-            actor_id=ctx.author.id,
-            starts_at=starts_at,
-            capacity=int(template["capacity"]),
-            title=template["title"],
-            description=template["description"],
-            duration_minutes=int(template["duration_minutes"]),
-            source_type="template",
-        )
-        events, stored = await self._event(ctx.guild, event["event_id"])
-        self._apply_template(stored, template)
-        await self._save(ctx.guild, events, stored)
-        await ctx.send(f"Created EventCheckin draft **#{event['event_id']}** from `{name.casefold()}`.")
 
     @event_checkin.command(name="calendar")
     async def calendar(self, ctx: commands.Context, status: str = "all") -> None:
@@ -2045,14 +2386,6 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         selected = list(events) if status == "all" else [event for event in events if event.get("status") == status]
         payload = build_calendar(ctx.guild.id, ctx.guild.name, selected, self._now()).encode("utf-8")
         await ctx.send(file=discord.File(io.BytesIO(payload), filename=f"{ctx.guild.id}-events.ics"))
-
-    @event_checkin.command(name="discordevent")
-    @commands.admin_or_permissions(manage_events=True)
-    @commands.bot_has_permissions(manage_events=True)
-    async def discord_event(self, ctx: commands.Context, event_id: int) -> None:
-        """Create a native Discord scheduled event from an EventCheckin event."""
-        scheduled = await self._create_discord_event(ctx.guild, event_id, ctx.author)
-        await ctx.send(f"Created Discord scheduled event **{scheduled.name}** (`{scheduled.id}`).")
 
     async def _create_discord_event(
         self, guild: discord.Guild, event_id: int, actor: discord.abc.User
@@ -2162,84 +2495,6 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         await self._refresh(ctx.guild, event)
         await ctx.send(f"Checked in {member.mention}.")
 
-    @event_checkin.command(name="attendees")
-    async def attendees(self, ctx: commands.Context, event_id: int, status: str = "going") -> None:
-        """List attendees in a registration state."""
-        _events, event = await self._event(ctx.guild, event_id)
-        rows = [record for record in event.get("attendees", {}).values() if status == "all" or record.get("status") == status]
-        rows.sort(key=lambda record: record.get("registered_at", 0))
-        lines = []
-        for record in rows[:50]:
-            role = self._role(event, record.get("role_id"))
-            lines.append(f"• <@{record['user_id']}> · {record['status']}" + (f" · {role['name']}" if role else ""))
-        await ctx.send(
-            embed=discord.Embed(
-                title=f"{event['title']} · {status}", description="\n".join(lines) or "No attendees.", color=self.COLOR
-            )
-        )
-
-    @event_checkin.command(name="finalize")
-    @commands.admin_or_permissions(manage_events=True)
-    async def finalize(self, ctx: commands.Context, event_id: int) -> None:
-        """Close registration, mark unarrived RSVPs as no-shows, and award a role."""
-        events, event = await self._event(ctx.guild, event_id)
-        checked = no_shows = rewards = errors = 0
-        role = ctx.guild.get_role(event.get("reward_role_id")) if event.get("reward_role_id") else None
-        for record in event.get("attendees", {}).values():
-            if record.get("checked_in_at"):
-                record["status"] = "checked_in"
-                checked += 1
-                member = ctx.guild.get_member(record["user_id"])
-                if member and role and role not in member.roles:
-                    try:
-                        await member.add_roles(role, reason=f"EventCheckin event #{event_id} attendance")
-                        rewards += 1
-                    except discord.HTTPException:
-                        errors += 1
-            elif record.get("status") == "going":
-                record["status"] = "no_show"
-                no_shows += 1
-        event.update(status="finalized", finalized_at=self._now(), finalized_by=ctx.author.id)
-        await self._save(ctx.guild, events, event)
-        await self._refresh(ctx.guild, event)
-        await self._log(
-            ctx.guild,
-            f"Event **#{event_id} {event['title']}** finalized: {checked} checked in, "
-            f"{no_shows} no-show(s), {rewards} reward(s), {errors} error(s).",
-        )
-        await ctx.send(
-            f"Finalized: **{checked}** checked in, **{no_shows}** no-show(s), "
-            f"**{rewards}** reward role(s), **{errors}** error(s)."
-        )
-
-    @event_checkin.command(name="cancel")
-    @commands.admin_or_permissions(manage_events=True)
-    async def cancel(self, ctx: commands.Context, event_id: int, *, reason: str = "") -> None:
-        """Cancel an event without deleting its attendance record."""
-        events, event = await self._event(ctx.guild, event_id)
-        event.update(status="cancelled", cancel_reason=reason[:500], finalized_at=self._now(), finalized_by=ctx.author.id)
-        await self._save(ctx.guild, events, event)
-        await self._refresh(ctx.guild, event)
-        notified = 0
-        for record in list(event.get("attendees", {}).values())[:100]:
-            member = ctx.guild.get_member(record.get("user_id"))
-            if member:
-                with suppress(discord.Forbidden, discord.HTTPException):
-                    await member.send(
-                        f"**{event['title']}** in **{ctx.guild.name}** was cancelled."
-                        + (f"\nReason: {reason[:500]}" if reason else "")
-                    )
-                    notified += 1
-        channel = ctx.guild.get_channel(event.get("channel_id"))
-        if isinstance(channel, discord.TextChannel):
-            with suppress(discord.HTTPException):
-                await channel.send(
-                    f"**{event['title']}** was cancelled." + (f"\nReason: {reason[:500]}" if reason else ""),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-        await self._audit(ctx.guild, "event cancellation", "completed", f"Event #{event_id}; {notified} DM(s)")
-        await ctx.send(f"Event **#{event_id}** cancelled; notified **{notified}** reachable attendee(s).")
-
     @event_checkin.command(name="list")
     async def list_events(self, ctx: commands.Context, status: str = "open") -> None:
         """List events by status, or use all."""
@@ -2256,42 +2511,6 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         await ctx.send(
             embed=discord.Embed(title=f"Events · {timezone_name}", description="\n".join(lines) or "No events.", color=self.COLOR)
         )
-
-    @event_checkin.command(name="series")
-    async def series(self, ctx: commands.Context, event_id: int) -> None:
-        """List every retained event in an event's recurrence series."""
-        events, source = await self._event(ctx.guild, event_id)
-        group = source.get("recurrence_group")
-        selected = [item for item in events.values() if group and item.get("recurrence_group") == group]
-        if not group:
-            selected = [source]
-        selected.sort(key=lambda item: item["starts_at"])
-        lines = [f"`#{item['event_id']}` {item['status']} · <t:{item['starts_at']}:F>" for item in selected[:52]]
-        await ctx.send(embed=discord.Embed(title=source["title"], description="\n".join(lines), color=self.COLOR))
-
-    @event_checkin.command(name="seriescancel")
-    @commands.admin_or_permissions(manage_events=True)
-    async def series_cancel(self, ctx: commands.Context, event_id: int, *, reason: str = "") -> None:
-        """Cancel future draft/open occurrences in a recurrence series."""
-        events, source = await self._event(ctx.guild, event_id)
-        group = source.get("recurrence_group")
-        if not group:
-            raise commands.BadArgument("That event is not part of a recurrence series.")
-        now = self._now()
-        selected = [
-            item
-            for item in events.values()
-            if item.get("recurrence_group") == group
-            and item.get("status") in {"draft", "open"}
-            and int(item.get("starts_at", 0)) >= now
-        ]
-        for item in selected:
-            item.update(status="cancelled", cancel_reason=reason[:500], finalized_at=now, finalized_by=ctx.author.id)
-            events[str(item["event_id"])] = item
-        await self.config.guild(ctx.guild).events.set(events)
-        for item in selected:
-            await self._refresh(ctx.guild, item)
-        await ctx.send(f"Cancelled **{len(selected)}** future occurrence(s).")
 
     @event_checkin.command(name="stats")
     @commands.admin_or_permissions(manage_events=True)

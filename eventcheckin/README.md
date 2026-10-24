@@ -1,33 +1,74 @@
 # EventCheckin
 
-EventCheckin adds persistent RSVP, automatic waitlists, reminders, attendance check-ins, no-show finalization, recurring drafts, calendar exports, native Discord scheduled events, and optional reward roles.
+Create events from a button and a form, let members RSVP, pick roles and confirm requirements, check in on the day, and see who showed up. Everything day-to-day is menus and buttons; there are only a few commands, for setup and reports.
 
-Use `[p]eventcheckin setup #event-logs America/Chicago` to configure the log channel and calendar timezone together.
-
-Discord timestamp generators such as `<t:...>` use Unix seconds; pass that numeric timestamp to `create`:
+## Setup (once)
 
 ```text
-[p]eventcheckin create 1786003200 25 Community Workshop Details go here
-[p]eventcheckin location 1 Voice channel: Workshop
-[p]eventcheckin rewardrole 1 @AttendedWorkshop
-[p]eventcheckin post 1 #events
-[p]eventcheckin duration 1 90
-[p]eventcheckin repeat 1 7 5
-[p]eventcheckin calendar all
-[p]eventcheckin discordevent 1
-[p]eventcheckin template save 1 workshop
-[p]eventcheckin template use workshop 1786608000
-[p]eventcheckin stats 90
+[p]eventcheckin setup #event-logs Atlantic/Reykjavik
+[p]eventcheckin channel #events
+[p]eventcheckin panel #create-event
 ```
 
-When capacity is reached, later RSVPs enter a FIFO waitlist. Withdrawing a confirmed RSVP promotes the first waiting member. Check-in is time-bounded; staff can also use `[p]eventcheckin checkin`.
+1. `setup` sets the log channel and the timezone that event times are typed in (use your own, such as `America/Chicago` or `Europe/London`). Running it again without a timezone keeps the current one.
+2. `channel` sets the default channel for events. Whoever creates an event can pick a different channel from the dropdown each time.
+3. `panel` posts a permanent **Create Event** button.
 
-`finalize` marks remaining confirmed RSVPs as no-shows and awards the configured role to checked-in attendees. `export` creates an attendance CSV.
+The bot needs View Channel, Send Messages and Embed Links in those channels.
 
-`repeat` creates a bounded series of draft copies. `calendar` exports retained events as an RFC 5545 `.ics` file for Apple Calendar, Google Calendar, Outlook, and other calendar clients. Set a guild display timezone with `eventcheckin timezone America/Chicago`. `discordevent` creates an external native Discord scheduled event after a location and duration have been set.
+## Creating an event
 
-Templates preserve reusable event fields without attendees. `series` lists related occurrences and `seriescancel` closes future occurrences. Cancelling a single event updates its panel, posts a cancellation notice, and privately notifies up to 100 reachable registered members. `stats` reports aggregate registration, check-in, and no-show counts.
+Anyone with **Manage Events** clicks **Create Event**. A private step first asks which channel to post in (and, if you have saved templates, which template to start from, or *Blank event*); press **Continue**. The form asks for the title, start time, length, max attendees and location, then the event is posted with RSVP, Withdraw, Check in and Manage buttons.
 
-When DecisionLedger is loaded, `decision reviewevent` creates a linked EventCheckin draft for a scheduled decision review. EventCheckin remains independent when DecisionLedger is absent.
+- Start times: `2026-11-05 19:30`, `5 Nov 7:30pm`, `tomorrow 8pm`, `fri 19:00`.
+- Lengths: `90`, `1h30m`, `2 hours`.
+- Mistakes show a private message with a button that reopens the form with your answers kept.
+- Slash users can run `/eventcheckin new` to open the form directly.
 
-The bot needs Send Messages and Embed Links for panels, plus Manage Roles when rewards are configured.
+## The Manage button
+
+Every event post has a **Manage** button that only staff can use. You also get the same menu privately right after creating an event.
+
+| Button | What it does |
+|---|---|
+| Edit details | Title, description, location |
+| Image | Set a banner from a link to an externally hosted image. **Remove image** clears it |
+| Requirements | Up to 10 confirmations (one per line). Members must press each one before they can RSVP and again before checking in |
+| Roles | Up to 10 roles (Tank / Healer / DPS, Driver / Navigator...), each with its own slots and up to 5 requirements |
+| Save as template | Saves the setup (including requirements, roles and image link) for the Create Event dropdown. 25 per server |
+| Add to Discord events | Creates a native scheduled event (needs a location) |
+| Attendees | Private list grouped by status, with roles |
+| Finalize | After a confirmation: closes registration, marks confirmed RSVPs who never checked in as no-shows, awards the reward role |
+| Cancel event | Asks for an optional reason, cancels, notifies everyone who registered |
+
+## For members
+
+- **RSVP** opens a private walkthrough: (1) tick the event's requirements, (2) pick a role (the dropdown shows how full each is), (3) tick that role's requirements and confirm. Events without roles skip steps 2 and 3.
+- A full role has its own waitlist. When a seat opens, the longest-waiting member of that role is promoted and pinged in the event channel.
+- Pressing RSVP again lets you switch roles. **Withdraw** gives your seat up.
+- **Check in** opens before the start time (2 hours by default) and closes after it (12 hours by default).
+- A reminder is posted shortly before the start (60 minutes by default).
+
+## Commands
+
+Everything above is menu-driven. These commands are for setup and reports. All need **Manage Events** or admin.
+
+| Command | Purpose |
+|---|---|
+| `[p]eventcheckin panel [#channel]` | Post the Create Event button |
+| `[p]eventcheckin new` | Open the form (slash) or post a button (prefix) |
+| `[p]eventcheckin channel [#channel]` | Where events are announced; empty = where the form was opened |
+| `[p]eventcheckin setup [#log] [timezone]` | Log channel and timezone |
+| `[p]eventcheckin list [status]` | List events (open, draft, finalized, cancelled, all) |
+| `[p]eventcheckin stats [days]` | Attendance totals |
+| `[p]eventcheckin export <event id>` | Attendance CSV, including requirements and roles |
+| `[p]eventcheckin calendar [status]` | `.ics` calendar export |
+| `[p]eventcheckin checkin <event id> @member` | Check someone in by hand |
+| `[p]eventcheckin rewardrole <event id> [@role]` | Role awarded to checked-in members when finalized |
+| `[p]eventcheckin post <event id> [#channel]` | Publish a draft (for example from DecisionLedger) |
+| `[p]eventcheckin repeat <event id> <every N days> <times>` | Make recurring draft copies; publish each with `post` |
+| `[p]eventcheckin template` / `template remove <name>` | List or delete saved templates |
+
+When DecisionLedger is loaded, `decision reviewevent` creates a linked EventCheckin draft; publish it with `post`. EventCheckin works fine without DecisionLedger.
+
+Settings such as reminder time and check-in window are also available in Red-Web-Dashboard.
