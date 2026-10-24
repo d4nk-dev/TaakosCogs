@@ -2,7 +2,7 @@
 import asyncio
 import contextlib
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import discord
 from redbot.core import Config, checks, commands
@@ -105,32 +105,39 @@ class CommandButtons(commands.Cog):
         self._cvs: Dict[int, asyncio.Condition] = {}
 
     async def cog_load(self):
-        await self.bot.wait_until_red_ready()
-        await self._restore()
+        self.bot.loop.create_task(self._restore_delayed())
+
+    async def _restore_delayed(self):
+        try:
+            await self.bot.wait_until_red_ready()
+            await self._restore()
+        except Exception as e:
+            log.error(f"Failed to restore views: {e}", exc_info=e)
 
     async def _restore(self):
-        all_guilds = await self.config.all_guilds()
-        for guild_id, data in all_guilds.items():
-            for panel_id, panel in data.get("panels", {}).items():
-                try:
-                    view = PanelButtonView(self, panel_id, panel.get("buttons", []))
-                    msg_id = panel.get("message_id")
-                    if msg_id:
-                        self.bot.add_view(view, message_id=msg_id)
-                except Exception as e:
-                    log.error(f"Failed to restore {panel_id}: {e}")
+        try:
+            all_guilds = await self.config.all_guilds()
+            for guild_id, data in all_guilds.items():
+                for panel_id, panel in data.get("panels", {}).items():
+                    try:
+                        view = PanelButtonView(self, panel_id, panel.get("buttons", []))
+                        msg_id = panel.get("message_id")
+                        if msg_id:
+                            self.bot.add_view(view, message_id=msg_id)
+                    except Exception as e:
+                        log.error(f"Failed to restore {panel_id}: {e}")
+        except Exception as e:
+            log.error(f"Error in restore: {e}", exc_info=e)
 
     @commands.guild_only()
     @checks.admin_or_permissions(manage_guild=True)
     @commands.group(name="cbuttons", aliases=["commandbuttons", "btnpanel"], invoke_without_command=True)
     async def cbuttons(self, ctx: commands.Context):
-        """Create and manage sticky command button panels."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
     @cbuttons.command(name="new")
     async def cbuttons_new(self, ctx: commands.Context, name: str, *, description: str = None):
-        """Create a new button panel."""
         panels = await self.config.guild(ctx.guild).panels()
         pid = name.lower().replace(" ", "-")
         panels[pid] = {
@@ -146,7 +153,6 @@ class CommandButtons(commands.Cog):
 
     @cbuttons.command(name="add")
     async def cbuttons_add(self, ctx: commands.Context, panel_id: str):
-        """Interactively add a button to a panel."""
         panels = await self.config.guild(ctx.guild).panels()
         if panel_id not in panels:
             await ctx.send("Panel not found.")
@@ -189,14 +195,14 @@ class CommandButtons(commands.Cog):
             try:
                 m = await self.bot.wait_for("message", check=check, timeout=30)
                 n = max(1, min(5, int(m.content.strip())))
-            except:
+            except Exception:
                 n = 1
             for i in range(n):
                 await ctx.send(f"Input {i+1} label:")
                 try:
                     m2 = await self.bot.wait_for("message", check=check, timeout=60)
                     fields.append({"label": m2.content.strip(), "required": True})
-                except:
+                except Exception:
                     fields.append({"label": f"Input {i+1}", "required": True})
 
         panels[panel_id]["buttons"].append({
@@ -210,7 +216,6 @@ class CommandButtons(commands.Cog):
 
     @cbuttons.command(name="post")
     async def cbuttons_post(self, ctx: commands.Context, panel_id: str, channel: discord.TextChannel = None):
-        """Post panel to a channel."""
         panels = await self.config.guild(ctx.guild).panels()
         if panel_id not in panels:
             return await ctx.send("Panel not found.")
@@ -228,7 +233,6 @@ class CommandButtons(commands.Cog):
 
     @cbuttons.command(name="sticky")
     async def cbuttons_sticky(self, ctx: commands.Context, panel_id: str, channel: discord.TextChannel = None):
-        """Make panel sticky in channel - reposts when messages come in."""
         panels = await self.config.guild(ctx.guild).panels()
         if panel_id not in panels:
             return await ctx.send("Panel not found.")
@@ -238,12 +242,11 @@ class CommandButtons(commands.Cog):
         await self.config.guild(ctx.guild).sticky.set(sticky)
 
         panel = panels[panel_id]
-        # Remove old if exists
         if panel.get("sticky_last_id"):
             try:
                 old = channel.get_partial_message(panel["sticky_last_id"])
                 await old.delete()
-            except:
+            except Exception:
                 pass
 
         view = PanelButtonView(self, panel_id, panel["buttons"])
@@ -261,8 +264,9 @@ class CommandButtons(commands.Cog):
     async def cbuttons_unsticky(self, ctx: commands.Context, channel: discord.TextChannel = None):
         channel = channel or ctx.channel
         sticky = await self.config.guild(ctx.guild).sticky()
-        if str(channel.id) in sticky:
-            del sticky[str(channel.id)]
+        key = str(channel.id)
+        if key in sticky:
+            del sticky[key]
             await self.config.guild(ctx.guild).sticky.set(sticky)
             await ctx.send("Unstuck.")
         else:
@@ -274,91 +278,103 @@ class CommandButtons(commands.Cog):
             return
         if isinstance(message.channel, discord.abc.PrivateChannel):
             return
-        sticky = await self.config.guild(message.guild).sticky()
-        cfg = sticky.get(str(message.channel.id))
-        if not cfg:
-            return
-        await self._repost(message.guild, message.channel, cfg["panel_id"])
+        try:
+            sticky = await self.config.guild(message.guild).sticky()
+            cfg = sticky.get(str(message.channel.id))
+            if not cfg:
+                return
+            await self._repost(message.guild, message.channel, cfg["panel_id"])
+        except Exception as e:
+            log.error(f"on_message error: {e}")
 
     async def _repost(self, guild, channel, panel_id):
-        cv = self._cvs.setdefault(channel.id, asyncio.Condition())
-        async with cv:
-            await cv.wait_for(lambda: channel.id not in self.locked)
-
-        sticky = await self.config.guild(guild).sticky()
-        cfg = sticky.get(str(channel.id))
-        if not cfg or cfg.get("panel_id") != panel_id:
-            return
-        cooldown = cfg.get("cooldown", self.DEFAULT_COOLDOWN)
-        await asyncio.sleep(cooldown)
-
-        async with cv:
-            await cv.wait_for(lambda: channel.id not in self.locked)
-            sticky2 = await self.config.guild(guild).sticky()
-            if str(channel.id) not in sticky2 or sticky2[str(channel.id)].get("panel_id") != panel_id:
+        try:
+            cv = self._cvs.setdefault(channel.id, asyncio.Condition())
+            async with cv:
+                await cv.wait_for(lambda: channel.id not in self.locked)
+            sticky = await self.config.guild(guild).sticky()
+            cfg = sticky.get(str(channel.id))
+            if not cfg or cfg.get("panel_id") != panel_id:
                 return
-            panels = await self.config.guild(guild).panels()
-            if panel_id not in panels:
-                return
-            panel = panels[panel_id]
-            old_id = panel.get("sticky_last_id")
-            if old_id:
-                try:
-                    old = channel.get_partial_message(old_id)
-                    await old.delete()
-                except Exception:
-                    pass
-            view = PanelButtonView(self, panel_id, panel["buttons"])
-            content = panel.get("description") or f"**{panel['name']}**"
-            msg = await channel.send(content, view=view)
-            panel["sticky_last_id"] = msg.id
-            panel["message_id"] = msg.id
-            panel["channel_id"] = channel.id
-            panels[panel_id] = panel
-            await self.config.guild(guild).panels.set(panels)
-            self.bot.add_view(view, message_id=msg.id)
+            cooldown = cfg.get("cooldown", self.DEFAULT_COOLDOWN)
+            await asyncio.sleep(cooldown)
+            async with cv:
+                await cv.wait_for(lambda: channel.id not in self.locked)
+                sticky2 = await self.config.guild(guild).sticky()
+                if str(channel.id) not in sticky2 or sticky2[str(channel.id)].get("panel_id") != panel_id:
+                    return
+                panels = await self.config.guild(guild).panels()
+                if panel_id not in panels:
+                    return
+                panel = panels[panel_id]
+                old_id = panel.get("sticky_last_id")
+                if old_id:
+                    try:
+                        old = channel.get_partial_message(old_id)
+                        await old.delete()
+                    except Exception:
+                        pass
+                view = PanelButtonView(self, panel_id, panel["buttons"])
+                content = panel.get("description") or f"**{panel['name']}**"
+                msg = await channel.send(content, view=view)
+                panel["sticky_last_id"] = msg.id
+                panel["message_id"] = msg.id
+                panel["channel_id"] = channel.id
+                panels[panel_id] = panel
+                await self.config.guild(guild).panels.set(panels)
+                self.bot.add_view(view, message_id=msg.id)
+        except Exception as e:
+            log.error(f"_repost error: {e}")
 
     async def button_clicked(self, interaction: discord.Interaction, panel_id: str, btn_idx: int):
-        panels = await self.config.guild(interaction.guild).panels()
-        if panel_id not in panels:
-            return await interaction.response.send_message("Panel missing.", ephemeral=True)
-        btns = panels[panel_id].get("buttons", [])
-        if btn_idx >= len(btns):
-            return await interaction.response.send_message("Button missing.", ephemeral=True)
-        btn = btns[btn_idx]
-        command = btn.get("command", "")
-        fields = btn.get("modal_fields", [])
-        if fields:
-            modal = ContextModal(self, panel_id, btn_idx, command, fields)
-            return await interaction.response.send_modal(modal)
-        await interaction.response.defer(ephemeral=True)
-        await self.invoke_command(interaction, command)
+        try:
+            panels = await self.config.guild(interaction.guild).panels()
+            if panel_id not in panels:
+                return await interaction.response.send_message("Panel missing.", ephemeral=True)
+            btns = panels[panel_id].get("buttons", [])
+            if btn_idx >= len(btns):
+                return await interaction.response.send_message("Button missing.", ephemeral=True)
+            btn = btns[btn_idx]
+            command = btn.get("command", "")
+            fields = btn.get("modal_fields", [])
+            if fields:
+                modal = ContextModal(self, panel_id, btn_idx, command, fields)
+                return await interaction.response.send_modal(modal)
+            await interaction.response.defer(ephemeral=True)
+            await self.invoke_command(interaction, command)
+        except Exception as e:
+            log.error(f"button_clicked error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Error.", ephemeral=True)
+                else:
+                    await interaction.followup.send("Error.", ephemeral=True)
+            except Exception:
+                pass
 
     async def invoke_command(self, interaction: discord.Interaction, command: str):
-        # Try to invoke the command through the bot
         try:
-            # Create a fake message context
-            fake_content = f"{self.bot.command_prefix[0] if hasattr(self.bot, 'command_prefix') else '!'}{command}"
-            # For Red, easier to get context from message if exists
-            if interaction.message:
-                msg = interaction.message
-                # Create a new message-like context
-                ctx = await self.bot.get_context(msg)
-                if ctx.prefix is None:
-                    ctx.prefix = self.bot.command_prefix[0] if isinstance(self.bot.command_prefix, (list, tuple)) else self.bot.command_prefix
-                ctx.message.content = f"{ctx.prefix}{command}"
-                ctx = await self.bot.get_context(ctx.message)
-                ctx.author = interaction.user
-                ctx.channel = interaction.channel
-                ctx.guild = interaction.guild
-                if ctx.valid and ctx.command:
-                    try:
-                        await self.bot.invoke(ctx)
-                        return
-                    except Exception as e:
-                        await interaction.followup.send(f"Error executing command: {e}", ephemeral=True)
-                        return
-            # Fallback
-            await interaction.followup.send(f"Ran: `{command}`", ephemeral=True)
+            msg = interaction.message
+            if not msg:
+                return await interaction.followup.send("Cannot invoke command.", ephemeral=True)
+            ctx = await self.bot.get_context(msg)
+            if isinstance(self.bot.command_prefix, (list, tuple, set)):
+                prefix = self.bot.command_prefix[0]
+            else:
+                prefix = self.bot.command_prefix
+            if not prefix:
+                prefix = "!"
+            ctx.message.content = f"{prefix}{command}"
+            ctx2 = await self.bot.get_context(ctx.message)
+            ctx2.author = interaction.user
+            ctx2.channel = interaction.channel
+            ctx2.guild = interaction.guild
+            if ctx2.valid and ctx2.command:
+                await self.bot.invoke(ctx2)
+                return
+            await interaction.followup.send(f"Executed: `{command}`", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"Error: {e}", ephemeral=True)
+            try:
+                await interaction.followup.send(f"Error: {e}", ephemeral=True)
+            except Exception:
+                pass
