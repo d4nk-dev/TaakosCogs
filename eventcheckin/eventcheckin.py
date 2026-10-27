@@ -2864,9 +2864,11 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             raise commands.BadArgument(f"I need View Channel, Send Messages and Embed Links in {channel.mention}.")
         timezone_name, _zone = await self._guild_zone(ctx.guild)
         embed = discord.Embed(
-            title="📅 Create an event",
+            title="Create an event",
             description=(
-                "Click **Create Event** and fill in the form. The event is saved as a draft: edit it, then post it with **Post to channel** when it's ready. **Drafts** reopens unposted events.\n"
+                "Click **Create Event** and fill in the form.\n"
+                "The Event is saved as a draft: edit it, then post it with **Post to channel** when it's ready.\n" 
+                "**Drafts** reopens unposted events.\n"
                 "Only members with **Manage Events** can create events."
             ),
             color=self.COLOR,
