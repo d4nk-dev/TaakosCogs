@@ -11,6 +11,3 @@ UNIQUE_ID = 0xCB5E9004
 log = logging.getLogger("red.commandbuttons")
 
 # Also add alternative invoke for better compatibility
-
-    async def cog_command_error(self, ctx, error):
-        pass
