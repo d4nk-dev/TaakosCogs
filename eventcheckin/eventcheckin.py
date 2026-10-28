@@ -20,6 +20,7 @@ from redbot.core import Config, commands
 
 from .calendar_utils import build_calendar
 from .dashboard_integration import DashboardIntegration
+from .images import resolve_image
 from .parsing import ParseError, parse_capacity, parse_duration, parse_start
 
 if TYPE_CHECKING:
@@ -1849,6 +1850,11 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             return
         guild = context[0]
         await interaction.response.defer(ephemeral=True)
+        result = await resolve_image(url)
+        if not result.ok:
+            await interaction.followup.send(f"⚠️ {result.message} Nothing was changed.", ephemeral=True)
+            return
+        url = result.url or url
         async with self._lock(guild.id):
             events, event = await self._event(guild, event_id)
             updated = {**event, "image_url": url}
@@ -1865,9 +1871,14 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 await interaction.followup.send(f"⚠️ Discord rejected that image link: {error.text or error}", ephemeral=True)
                 return
             await self._save(guild, events, updated)
-        await interaction.followup.send(
-            "🖼️ Image set." + ("" if event.get("message_id") else " It will show when you post the event."), ephemeral=True
-        )
+        note = "🖼️ Image set."
+        if result.from_page:
+            note += " That link was a web page, so I used the picture from it."
+        if not result.checked:
+            note += " I couldn't check that link from here. If no picture shows up, copy the image's own address instead."
+        if not event.get("message_id"):
+            note += " It will show when you post the event."
+        await interaction.followup.send(note, ephemeral=True)
 
     async def handle_remove_image(self, interaction: discord.Interaction, event_id: int) -> None:
         context = await self._staff_event(interaction, event_id)
@@ -2864,11 +2875,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             raise commands.BadArgument(f"I need View Channel, Send Messages and Embed Links in {channel.mention}.")
         timezone_name, _zone = await self._guild_zone(ctx.guild)
         embed = discord.Embed(
-            title="Create an event",
+            title="📅 Create an event",
             description=(
-                "Click **Create Event** and fill in the form.\n"
-                "The Event is saved as a draft: edit it, then post it with **Post to channel** when it's ready.\n" 
-                "**Drafts** reopens unposted events.\n"
+                "Click **Create Event** and fill in the form. The event is saved as a draft: edit it, then post it with **Post to channel** when it's ready. **Drafts** reopens unposted events.\n"
                 "Only members with **Manage Events** can create events."
             ),
             color=self.COLOR,

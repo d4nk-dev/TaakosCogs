@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.12.1
+
+- **Image links are checked.** When you set an image, the bot now looks at the link first. If it is a direct image (PNG, JPG, GIF, WebP) it is used. If it is a **web page** (for example an image-host or gallery page, which looks fine in a browser but is not a picture file), the bot finds the page's own picture and uses that. If there is no picture, or the link is a 404, text, or an SVG (which Discord can't show), you get a clear message and nothing is saved. Sites that block bots are accepted with a warning. The bot won't fetch links that point at private or local addresses.
+- New file `images.py` (add it to your `eventcheckin/` folder).
+
 ## 1.12.0
 
 - **Names on the post.** The event post now lists who is going (**✅ Going**) and who is on the waiting list (**⏳ Waiting**) by name. With roles, each role lists its members and its waiting members. The old counts-only RSVPs field is gone.

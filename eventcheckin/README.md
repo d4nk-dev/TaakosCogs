@@ -32,7 +32,7 @@ Every event post has a **Manage** button that only staff can use. You also get t
 | Button | What it does |
 |---|---|
 | Edit details | Title, description, location |
-| Image | Set a banner from a link to an externally hosted image. **Remove image** clears it |
+| Image | Set a banner from a link. A direct image link works best; a web page that has a picture also works (the bot finds it). **Remove image** clears it |
 | Requirements | Up to 10 confirmations (one per line). Members must press each one before they can RSVP and again before checking in |
 | Roles | Up to 10 roles (Tank / Healer / DPS, Driver / Navigator...), each with its own slots and up to 5 requirements |
 | Start event | Locks sign-ups, marks the event started and opens check-in. Members already in can still check in or withdraw |
