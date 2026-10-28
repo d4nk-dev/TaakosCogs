@@ -530,13 +530,16 @@ class CommandButtons(commands.Cog):
     @checks.admin_or_permissions(manage_guild=True)
     @commands.command(name="cbuttons")
     async def cbuttons_panel(self, ctx: commands.Context):
-        view = PanelManagerView(self, ctx)
-        embed = discord.Embed(
-            title="Command Buttons Manager",
-            description="Create panels, add buttons with commands/modals, post/make sticky.",
-            color=await ctx.embed_color(),
-        )
-        await ctx.send(embed=embed, view=view)
+        try:
+            view = PanelManagerView(self, ctx)
+            embed = discord.Embed(
+                title="Command Buttons Manager",
+                description="Create panels, manage buttons, post/make sticky. Use 'Manage' to add/edit/remove buttons.",
+                color=await ctx.embed_color(),
+            )
+            await ctx.send(embed=embed, view=view)
+        except Exception as e:
+            await ctx.send(f"Error loading UI: {e}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
