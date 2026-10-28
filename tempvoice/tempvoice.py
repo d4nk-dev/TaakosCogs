@@ -266,6 +266,8 @@ class TempVoice(DashboardIntegration, commands.Cog):
         self.config.register_guild(
             enabled=False,
             join_channel_id=None,
+            join_channel_ids=[],
+            join_channel_configs={},
             category_id=None,
             panel_channel_id=None,
             channel_name_template=self.DEFAULT_TEMPLATE,
@@ -313,6 +315,29 @@ class TempVoice(DashboardIntegration, commands.Cog):
 
     def _guild_lock(self, guild_id: int) -> asyncio.Lock:
         return self._locks.setdefault(guild_id, asyncio.Lock())
+
+    async def _get_join_channel_ids(self, guild: discord.Guild) -> list[int]:
+        settings = await self.config.guild(guild).all()
+        join_ids = []
+        if settings.get("join_channel_ids"):
+            for cid in settings.get("join_channel_ids") or []:
+                try:
+                    join_ids.append(int(cid))
+                except (TypeError, ValueError):
+                    continue
+        if settings.get("join_channel_id") is not None:
+            try:
+                join_ids.append(int(settings.get("join_channel_id")))
+            except (TypeError, ValueError):
+                pass
+        # deduplicate while preserving order
+        seen = set()
+        result = []
+        for cid in join_ids:
+            if cid not in seen:
+                seen.add(cid)
+                result.append(cid)
+        return result
 
     @staticmethod
     def _now_ts() -> float:
@@ -765,7 +790,8 @@ class TempVoice(DashboardIntegration, commands.Cog):
             settings = await self.config.guild(guild).all()
             if not settings.get("enabled"):
                 return
-            if int(settings.get("join_channel_id") or 0) != trigger.id:
+            join_ids = await self._get_join_channel_ids(guild)
+            if trigger.id not in join_ids:
                 return
 
             existing = await self._active_owner_channel(guild, member.id)
@@ -792,12 +818,27 @@ class TempVoice(DashboardIntegration, commands.Cog):
             if category is None:
                 category = trigger.category
 
+            # Check for per-join-channel config
+            join_configs = settings.get("join_channel_configs") or {}
+            trigger_key = str(trigger.id)
+            trigger_config = join_configs.get(trigger_key) or {}
+            template = trigger_config.get("name_template") or settings.get("channel_name_template") or self.DEFAULT_TEMPLATE
+            # If template is set to a fixed name (no placeholders), allow custom naming
             name = self._render_channel_name(
-                str(settings.get("channel_name_template") or self.DEFAULT_TEMPLATE),
+                str(template),
                 member,
                 guild,
             )
-            user_limit = max(0, min(int(settings.get("default_user_limit") or 0), 99))
+            # If the template was meant to be a fixed custom name, and user wants full control,
+            # also allow using the template as-is if it contains no placeholders
+            if "{owner}" not in template and "{username}" not in template and "{user}" not in template and "{guild}" not in template:
+                # Check if they want fixed name
+                if trigger_config.get("use_fixed_name"):
+                    name = self._clean_channel_name(template)
+                elif trigger_config.get("allow_custom_name_on_create"):
+                    # Could be extended to prompt, but for now just use as base
+                    name = self._clean_channel_name(template.replace("{owner}", member.display_name).replace("{username}", member.name).replace("{user}", member.display_name))
+            user_limit = max(0, min(int(trigger_config.get("default_user_limit") if trigger_config.get("default_user_limit") is not None else settings.get("default_user_limit") or 0), 99))
 
             overwrites = dict(trigger.overwrites) if settings.get("clone_trigger_permissions", True) else {}
             default_overwrite = overwrites.get(
@@ -901,8 +942,10 @@ class TempVoice(DashboardIntegration, commands.Cog):
         if isinstance(after.channel, discord.VoiceChannel):
             self._cancel_cleanup(after.channel.id)
             settings = await self.config.guild(member.guild).all()
-            if settings.get("enabled") and int(settings.get("join_channel_id") or 0) == after.channel.id:
-                await self._create_temp_channel_for(member, after.channel)
+            if settings.get("enabled"):
+                join_ids = await self._get_join_channel_ids(member.guild)
+                if after.channel.id in join_ids:
+                    await self._create_temp_channel_for(member, after.channel)
 
         if before.channel is not None:
             await self._maybe_cleanup_channel(before.channel)
@@ -1376,10 +1419,17 @@ class TempVoice(DashboardIntegration, commands.Cog):
             value="Yes" if settings.get("enabled") else "No",
             inline=True,
         )
+        # Collect join channels
+        join_channels = []
+        join_ids = settings.get("join_channel_ids") or []
+        for cid in join_ids:
+            join_channels.append(self._channel_ref(guild, cid))
+        if not join_channels and settings.get("join_channel_id"):
+            join_channels.append(self._channel_ref(guild, settings.get("join_channel_id")))
         embed.add_field(
-            name="Join Channel",
-            value=self._channel_ref(guild, settings.get("join_channel_id")),
-            inline=True,
+            name="Join Channels",
+            value="\n".join(join_channels) if join_channels else "Not set",
+            inline=False,
         )
         embed.add_field(
             name="Category",
@@ -1479,6 +1529,9 @@ class TempVoice(DashboardIntegration, commands.Cog):
 
         await self.config.guild(ctx.guild).enabled.set(True)
         await self.config.guild(ctx.guild).join_channel_id.set(join_channel.id)
+        async with self.config.guild(ctx.guild).join_channel_ids() as join_ids:
+            if join_channel.id not in join_ids:
+                join_ids.append(join_channel.id)
         await self.config.guild(ctx.guild).category_id.set(
             category.id if category else None,
         )
@@ -1528,10 +1581,60 @@ class TempVoice(DashboardIntegration, commands.Cog):
         """Set the voice channel that creates temporary channels."""
         assert ctx.guild is not None
         await self.config.guild(ctx.guild).join_channel_id.set(channel.id)
+        async with self.config.guild(ctx.guild).join_channel_ids() as join_ids:
+            if channel.id not in join_ids:
+                join_ids.append(channel.id)
         await self.config.guild(ctx.guild).enabled.set(True)
         await ctx.send(
             f"Users who join {channel.mention} will get a temporary voice channel.",
         )
+
+    @tempvoice.command(
+        name="addjoin",
+        aliases=["addtrigger", "addjoinchannel"],
+        description="Add another join-to-create voice channel.",
+    )
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def tempvoice_addjoin(
+        self,
+        ctx: commands.Context,
+        channel: discord.VoiceChannel,
+    ) -> None:
+        """Add an additional join-to-create voice channel."""
+        assert ctx.guild is not None
+        async with self.config.guild(ctx.guild).join_channel_ids() as join_ids:
+            if channel.id in join_ids:
+                await ctx.send(f"{channel.mention} is already a join-to-create channel.")
+                return
+            join_ids.append(channel.id)
+        await self.config.guild(ctx.guild).join_channel_id.set(channel.id)
+        await self.config.guild(ctx.guild).enabled.set(True)
+        await ctx.send(
+            f"Added {channel.mention} as a join-to-create channel.",
+        )
+
+    @tempvoice.command(
+        name="removejoin",
+        aliases=["removetrigger", "removejoinchannel"],
+        description="Remove a join-to-create voice channel.",
+    )
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def tempvoice_removejoin(
+        self,
+        ctx: commands.Context,
+        channel: discord.VoiceChannel,
+    ) -> None:
+        """Remove a join-to-create voice channel."""
+        assert ctx.guild is not None
+        async with self.config.guild(ctx.guild).join_channel_ids() as join_ids:
+            if channel.id in join_ids:
+                join_ids.remove(channel.id)
+            else:
+                await ctx.send(f"{channel.mention} is not a join-to-create channel.")
+                return
+        await ctx.send(f"Removed {channel.mention} from join-to-create channels.")
 
     @tempvoice.command(
         name="category",
@@ -1624,6 +1727,45 @@ class TempVoice(DashboardIntegration, commands.Cog):
         await self.config.guild(ctx.guild).channel_name_template.set(template)
         await ctx.send(
             f"Temporary voice channels will use this template: `{discord.utils.escape_markdown(template)}`",
+        )
+
+    @tempvoice.command(
+        name="name",
+        aliases=["channelname", "setname"],
+        description="Set a fixed name or template for temp channels.",
+    )
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def tempvoice_name(self, ctx: commands.Context, *, name: str) -> None:
+        """Set the temporary voice channel name (supports placeholders)."""
+        assert ctx.guild is not None
+        name = self._clean_channel_name(name)
+        await self.config.guild(ctx.guild).channel_name_template.set(name)
+        await ctx.send(
+            f"Temporary voice channels will use this name/template: `{discord.utils.escape_markdown(name)}`",
+        )
+
+    @tempvoice.command(
+        name="joinname",
+        aliases=["triggertemplate"],
+        description="Set name/template for a specific join channel.",
+    )
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def tempvoice_joinname(
+        self,
+        ctx: commands.Context,
+        join_channel: discord.VoiceChannel,
+        *,
+        name: str,
+    ) -> None:
+        """Set a custom name/template for temp channels created from a specific join channel."""
+        assert ctx.guild is not None
+        name = self._clean_channel_name(name)
+        async with self.config.guild(ctx.guild).join_channel_configs() as configs:
+            configs[str(join_channel.id)] = {"name_template": name}
+        await ctx.send(
+            f"Channels created from {join_channel.mention} will use: `{discord.utils.escape_markdown(name)}`",
         )
 
     @tempvoice.command(

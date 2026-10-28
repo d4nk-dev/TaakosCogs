@@ -309,6 +309,28 @@ class DashboardIntegration:
     ) -> None:
         enabled = self._dash_bool(form_data, "enabled")
         join_channel_id = self._dash_optional_id(form_data, "join_channel_id")
+        # Also support multiple join channels from multi-select if present
+        join_channel_ids = []
+        # Try to get from form_data as list
+        try:
+            data = form_data
+            if hasattr(data, "getlist"):
+                vals = data.getlist("join_channel_ids") or []
+            elif isinstance(data, dict):
+                vals = data.get("join_channel_ids") or []
+                if isinstance(vals, str):
+                    vals = [vals]
+            else:
+                vals = []
+            for v in vals:
+                try:
+                    join_channel_ids.append(int(v))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        if join_channel_id and join_channel_id not in join_channel_ids:
+            join_channel_ids.append(join_channel_id)
         category_id = self._dash_optional_id(form_data, "category_id")
         panel_channel_id = self._dash_optional_id(form_data, "panel_channel_id")
         default_limit = self._dash_int(
@@ -330,17 +352,18 @@ class DashboardIntegration:
         )
         clone_permissions = self._dash_bool(form_data, "clone_trigger_permissions")
 
-        if enabled and join_channel_id is None:
+        if enabled and not join_channel_ids:
             raise commands.BadArgument(
                 "Set a join-to-create voice channel before enabling.",
             )
-        if join_channel_id is not None and not isinstance(
-            guild.get_channel(join_channel_id),
-            discord.VoiceChannel,
-        ):
-            raise commands.BadArgument(
-                "The join-to-create channel must be a voice channel.",
-            )
+        for jid in join_channel_ids:
+            if not isinstance(
+                guild.get_channel(jid),
+                discord.VoiceChannel,
+            ):
+                raise commands.BadArgument(
+                    "The join-to-create channel must be a voice channel.",
+                )
         if category_id is not None and not isinstance(
             guild.get_channel(category_id),
             discord.CategoryChannel,
@@ -365,7 +388,8 @@ class DashboardIntegration:
 
         guild_conf = self.config.guild(guild)
         await guild_conf.enabled.set(enabled)
-        await guild_conf.join_channel_id.set(join_channel_id)
+        await guild_conf.join_channel_id.set(join_channel_ids[0] if join_channel_ids else None)
+        await guild_conf.join_channel_ids.set(join_channel_ids)
         await guild_conf.category_id.set(category_id)
         await guild_conf.panel_channel_id.set(panel_channel_id)
         await guild_conf.default_user_limit.set(default_limit)
@@ -551,7 +575,12 @@ color: #07111f; }}
       {self._checkbox("enabled", "Enable join-to-create", settings.get("enabled"))}
       {
             self._select(
-                "join_channel_id", "Join-to-create voice channel", self._voice_options(guild), settings.get("join_channel_id")
+                "join_channel_id", "Join-to-create voice channel (primary)", self._voice_options(guild), settings.get("join_channel_id")
+            )
+        }
+      {
+            self._multi_select(
+                "join_channel_ids", "Additional join-to-create channels (hold Ctrl/Cmd)", self._voice_options(guild), settings.get("join_channel_ids") or []
             )
         }
       {
@@ -703,6 +732,31 @@ color: #07111f; }}
         return (
             f'<div class="tv-field"><label>{self._h(label)}</label>'
             f'<select name="{self._h(name)}">{"".join(option_html)}</select></div>'
+        )
+
+    def _multi_select(
+        self,
+        name: str,
+        label: str,
+        options: list[tuple[typing.Any, str]],
+        selected: typing.Any = None,
+    ) -> str:
+        if selected is None:
+            selected_list = []
+        elif isinstance(selected, (list, tuple, set)):
+            selected_list = list(selected)
+        else:
+            selected_list = [selected]
+        selected_set = set(str(s) for s in selected_list)
+        option_html = []
+        for value, text in options:
+            is_sel = str(value) in selected_set
+            option_html.append(
+                f'<option value="{self._h(value)}" {"selected" if is_sel else ""}>{self._h(text)}</option>',
+            )
+        return (
+            f'<div class="tv-field"><label>{self._h(label)}</label>'
+            f'<select name="{self._h(name)}" multiple size="4">{"".join(option_html)}</select></div>'
         )
 
     def _input(

@@ -14,12 +14,13 @@ Temporary voice channels with embedded owner controls for Red-DiscordBot.
 
 ## Highlights
 
-- Join-to-create voice channel setup.
+- Join-to-create voice channel setup - supports multiple join channels.
 - Automatic deletion of empty temporary voice channels.
 - Embedded control panel for each temporary channel.
 - Buttons for rename, lock/unlock, user limit, ownership transfer, permitted users, user removal, and claiming abandoned channels.
 - Uses a native Discord member picker for transfer, permit, and remove modals on current Red installations.
 - Optional text channel for control panels when you do not want to use voice channel chat.
+- Custom naming: set a global template/name or per-join-channel name.
 
 ## Quick Start
 
@@ -50,11 +51,15 @@ Post control panels in a text channel instead of the temporary voice channel cha
 | `[p]tempvoice setup [voice_channel] [category]` | Configure or create the join-to-create voice channel. |
 | `[p]tempvoice enable` | Enable temporary voice creation. |
 | `[p]tempvoice disable` | Disable new temporary voice creation. |
-| `[p]tempvoice joinchannel <voice_channel>` | Set the trigger voice channel. |
+| `[p]tempvoice joinchannel <voice_channel>` | Set/add the trigger voice channel. |
+| `[p]tempvoice addjoin <voice_channel>` | Add another join-to-create voice channel. |
+| `[p]tempvoice removejoin <voice_channel>` | Remove a join-to-create voice channel. |
 | `[p]tempvoice category [category]` | Set the category for temporary channels, or clear it. |
 | `[p]tempvoice panelchannel [text_channel]` | Set the control panel text channel, or clear it to use voice channel chat. |
 | `[p]tempvoice defaultlimit <0-99>` | Set the default user limit for new channels. |
 | `[p]tempvoice template <template>` | Set the channel name template. Supports `{owner}`, `{username}`, `{user}`, and `{guild}`. |
+| `[p]tempvoice name <name>` | Set a fixed name or template for temp channels. |
+| `[p]tempvoice joinname <join_channel> <name>` | Set name/template for a specific join channel. |
 | `[p]tempvoice autodelete <0-300>` | Set the empty-channel deletion delay in seconds. |
 | `[p]tempvoice list` | List active temporary channels. |
 | `[p]tempvoice claim` | Claim your current temporary channel if the owner is gone. |
