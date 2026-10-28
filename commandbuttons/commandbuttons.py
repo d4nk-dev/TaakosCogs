@@ -101,210 +101,6 @@ class ContextModal(discord.ui.Modal, title="Command Input"):
         await self.cog.invoke_command(interaction, cmd)
 
 
-class CommandButtons(commands.Cog):
-    """Manage sticky command button panels."""
-
-    DEFAULT_COOLDOWN = 3
-
-    def __init__(self, bot: Red):
-        self.bot = bot
-        self.config = Config.get_conf(self, identifier=UNIQUE_ID, force_registration=True)
-        self.config.register_guild(panels={}, sticky={})
-        self.locked = set()
-        self._cvs: Dict[int, asyncio.Condition] = {}
-
-    async def cog_load(self):
-        self.bot.loop.create_task(self._restore_delayed())
-
-    async def _restore_delayed(self):
-        try:
-            await self.bot.wait_until_red_ready()
-            await self._restore()
-        except Exception as e:
-            log.error(f"Failed to restore views: {e}", exc_info=e)
-
-    async def _restore(self):
-        try:
-            all_guilds = await self.config.all_guilds()
-            for guild_id, data in all_guilds.items():
-                for panel_id, panel in data.get("panels", {}).items():
-                    try:
-                        view = PanelButtonView(self, panel_id, panel.get("buttons", []))
-                        msg_id = panel.get("message_id")
-                        if msg_id:
-                            self.bot.add_view(view, message_id=msg_id)
-                    except Exception as e:
-                        log.error(f"Failed to restore {panel_id}: {e}")
-        except Exception as e:
-            log.error(f"Error in restore: {e}", exc_info=e)
-
-    @commands.guild_only()
-    @checks.admin_or_permissions(manage_guild=True)
-    @commands.command(name="cbuttons")
-    async def cbuttons_panel(self, ctx: commands.Context):
-        view = PanelManagerView(self, ctx)
-        embed = discord.Embed(
-            title="Command Buttons Manager",
-            description="Create panels, add buttons with commands/modals, post/make sticky.",
-            color=await ctx.embed_color(),
-        )
-        await ctx.send(embed=embed, view=view)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if not message.guild or message.author.bot:
-            return
-        if isinstance(message.channel, discord.abc.PrivateChannel):
-            return
-        try:
-            sticky = await self.config.guild(message.guild).sticky()
-            cfg = sticky.get(str(message.channel.id))
-            if not cfg:
-                return
-            await self._repost(message.guild, message.channel, cfg["panel_id"])
-        except Exception as e:
-            log.error(f"on_message error: {e}")
-
-    async def _repost(self, guild, channel, panel_id):
-        try:
-            cv = self._cvs.setdefault(channel.id, asyncio.Condition())
-            async with cv:
-                await cv.wait_for(lambda: channel.id not in self.locked)
-            sticky = await self.config.guild(guild).sticky()
-            cfg = sticky.get(str(channel.id))
-            if not cfg or cfg.get("panel_id") != panel_id:
-                return
-            cooldown = cfg.get("cooldown", self.DEFAULT_COOLDOWN)
-            await asyncio.sleep(cooldown)
-            async with cv:
-                await cv.wait_for(lambda: channel.id not in self.locked)
-                sticky2 = await self.config.guild(guild).sticky()
-                if str(channel.id) not in sticky2 or sticky2[str(channel.id)].get("panel_id") != panel_id:
-                    return
-                panels = await self.config.guild(guild).panels()
-                if panel_id not in panels:
-                    return
-                panel = panels[panel_id]
-                old_id = panel.get("sticky_last_id")
-                if old_id:
-                    try:
-                        old = channel.get_partial_message(old_id)
-                        await old.delete()
-                    except Exception:
-                        pass
-                view = PanelButtonView(self, panel_id, panel["buttons"])
-                content = panel.get("description") or f"**{panel['name']}**"
-                msg = await channel.send(content, view=view)
-                panel["sticky_last_id"] = msg.id
-                panel["message_id"] = msg.id
-                panel["channel_id"] = channel.id
-                panels[panel_id] = panel
-                await self.config.guild(guild).panels.set(panels)
-                try:
-                    self.bot.add_view(view, message_id=msg.id)
-                except Exception:
-                    pass
-        except Exception as e:
-            log.error(f"_repost error: {e}")
-
-    async def button_clicked(self, interaction: discord.Interaction, panel_id: str, btn_idx: int):
-        try:
-            panels = await self.config.guild(interaction.guild).panels()
-            if panel_id not in panels:
-                try:
-                    if not interaction.response.is_done():
-                        return await interaction.response.send_message("Missing", ephemeral=True)
-                except Exception:
-                    return
-            btns = panels[panel_id].get("buttons", [])
-            if btn_idx >= len(btns):
-                try:
-                    if not interaction.response.is_done():
-                        return await interaction.response.send_message("Missing", ephemeral=True)
-                except Exception:
-                    return
-            btn = btns[btn_idx]
-            command = btn.get("command", "")
-            fields = btn.get("modal_fields", [])
-            if fields:
-                modal = ContextModal(self, panel_id, btn_idx, command, fields, btn.get("label", ""))
-                try:
-                    if not interaction.response.is_done():
-                        return await interaction.response.send_modal(modal)
-                except Exception:
-                    return
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.defer(ephemeral=True)
-            except Exception:
-                pass
-            await self.invoke_command(interaction, command)
-        except Exception as e:
-            log.error(f"button_clicked error: {e}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Error", ephemeral=True)
-                else:
-                    await interaction.followup.send("Error", ephemeral=True)
-            except Exception:
-                pass
-
-    async def invoke_command(self, interaction: discord.Interaction, command: str):
-        try:
-            prefix = "!"
-            cmd_clean = command.strip()
-            while cmd_clean and cmd_clean[0] in "!.?/\\-~+><":
-                cmd_clean = cmd_clean[1:].strip()
-            full = f"{prefix}{cmd_clean}"
-            msg = interaction.message
-            if not msg:
-                try:
-                    await interaction.followup.send(full, ephemeral=True)
-                    return
-                except Exception:
-                    return
-            # Try to make a new message-like context
-            try:
-                # For Red, we can use bot.get_context on the message but override
-                msg.content = full
-            except Exception:
-                pass
-            try:
-                ctx = await self.bot.get_context(msg)
-                ctx.author = interaction.user
-                ctx.channel = interaction.channel
-                ctx.guild = interaction.guild
-                if ctx.message:
-                    ctx.message.content = full
-                    ctx.message.author = interaction.user
-                    ctx.message.channel = interaction.channel
-                    ctx.message.guild = interaction.guild
-                if ctx.command and ctx.valid:
-                    await self.bot.invoke(ctx)
-                    return
-                # Rebuild context
-                ctx2 = await self.bot.get_context(ctx.message)
-                ctx2.author = interaction.user
-                ctx2.channel = interaction.channel
-                ctx2.guild = interaction.guild
-                if ctx2.command and ctx2.valid:
-                    await self.bot.invoke(ctx2)
-                    return
-                await self.bot.process_commands(ctx2.message)
-                return
-            except Exception as e:
-                try:
-                    await interaction.followup.send(full, ephemeral=True)
-                    return
-                except Exception:
-                    pass
-                return
-        except Exception as e:
-            try:
-                await interaction.followup.send("Error", ephemeral=True)
-            except Exception:
-                pass
-
 
 class PanelManagerView(discord.ui.View):
     def __init__(self, cog, ctx):
@@ -358,6 +154,7 @@ class PanelManagerView(discord.ui.View):
             pass
 
 
+
 class CreatePanelModal(discord.ui.Modal, title="Create Panel"):
     name = discord.ui.TextInput(label="Panel Name", required=True)
     description = discord.ui.TextInput(label="Description", required=False, style=discord.TextStyle.paragraph)
@@ -380,6 +177,7 @@ class CreatePanelModal(discord.ui.Modal, title="Create Panel"):
             await interaction.followup.send(f"Created `{pid}`", ephemeral=True)
         except Exception:
             pass
+
 
 
 class QuickManageModal(discord.ui.Modal, title="Manage Panel"):
@@ -619,6 +417,7 @@ class QuickManageModal(discord.ui.Modal, title="Manage Panel"):
                 return
 
 
+
 class PostPanelModal(discord.ui.Modal, title="Post"):
     panel_id = discord.ui.TextInput(label="Panel ID", required=True)
     channel = discord.ui.TextInput(label="Channel", required=True)
@@ -674,3 +473,208 @@ class PostPanelModal(discord.ui.Modal, title="Post"):
             await interaction.followup.send("Done", ephemeral=True)
         except Exception:
             pass
+
+class CommandButtons(commands.Cog):
+    """Manage sticky command button panels."""
+
+    DEFAULT_COOLDOWN = 3
+
+    def __init__(self, bot: Red):
+        self.bot = bot
+        self.config = Config.get_conf(self, identifier=UNIQUE_ID, force_registration=True)
+        self.config.register_guild(panels={}, sticky={})
+        self.locked = set()
+        self._cvs: Dict[int, asyncio.Condition] = {}
+
+    async def cog_load(self):
+        self.bot.loop.create_task(self._restore_delayed())
+
+    async def _restore_delayed(self):
+        try:
+            await self.bot.wait_until_red_ready()
+            await self._restore()
+        except Exception as e:
+            log.error(f"Failed to restore views: {e}", exc_info=e)
+
+    async def _restore(self):
+        try:
+            all_guilds = await self.config.all_guilds()
+            for guild_id, data in all_guilds.items():
+                for panel_id, panel in data.get("panels", {}).items():
+                    try:
+                        view = PanelButtonView(self, panel_id, panel.get("buttons", []))
+                        msg_id = panel.get("message_id")
+                        if msg_id:
+                            self.bot.add_view(view, message_id=msg_id)
+                    except Exception as e:
+                        log.error(f"Failed to restore {panel_id}: {e}")
+        except Exception as e:
+            log.error(f"Error in restore: {e}", exc_info=e)
+
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.command(name="cbuttons")
+    async def cbuttons_panel(self, ctx: commands.Context):
+        view = PanelManagerView(self, ctx)
+        embed = discord.Embed(
+            title="Command Buttons Manager",
+            description="Create panels, add buttons with commands/modals, post/make sticky.",
+            color=await ctx.embed_color(),
+        )
+        await ctx.send(embed=embed, view=view)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild or message.author.bot:
+            return
+        if isinstance(message.channel, discord.abc.PrivateChannel):
+            return
+        try:
+            sticky = await self.config.guild(message.guild).sticky()
+            cfg = sticky.get(str(message.channel.id))
+            if not cfg:
+                return
+            await self._repost(message.guild, message.channel, cfg["panel_id"])
+        except Exception as e:
+            log.error(f"on_message error: {e}")
+
+    async def _repost(self, guild, channel, panel_id):
+        try:
+            cv = self._cvs.setdefault(channel.id, asyncio.Condition())
+            async with cv:
+                await cv.wait_for(lambda: channel.id not in self.locked)
+            sticky = await self.config.guild(guild).sticky()
+            cfg = sticky.get(str(channel.id))
+            if not cfg or cfg.get("panel_id") != panel_id:
+                return
+            cooldown = cfg.get("cooldown", self.DEFAULT_COOLDOWN)
+            await asyncio.sleep(cooldown)
+            async with cv:
+                await cv.wait_for(lambda: channel.id not in self.locked)
+                sticky2 = await self.config.guild(guild).sticky()
+                if str(channel.id) not in sticky2 or sticky2[str(channel.id)].get("panel_id") != panel_id:
+                    return
+                panels = await self.config.guild(guild).panels()
+                if panel_id not in panels:
+                    return
+                panel = panels[panel_id]
+                old_id = panel.get("sticky_last_id")
+                if old_id:
+                    try:
+                        old = channel.get_partial_message(old_id)
+                        await old.delete()
+                    except Exception:
+                        pass
+                view = PanelButtonView(self, panel_id, panel["buttons"])
+                content = panel.get("description") or f"**{panel['name']}**"
+                msg = await channel.send(content, view=view)
+                panel["sticky_last_id"] = msg.id
+                panel["message_id"] = msg.id
+                panel["channel_id"] = channel.id
+                panels[panel_id] = panel
+                await self.config.guild(guild).panels.set(panels)
+                try:
+                    self.bot.add_view(view, message_id=msg.id)
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error(f"_repost error: {e}")
+
+    async def button_clicked(self, interaction: discord.Interaction, panel_id: str, btn_idx: int):
+        try:
+            panels = await self.config.guild(interaction.guild).panels()
+            if panel_id not in panels:
+                try:
+                    if not interaction.response.is_done():
+                        return await interaction.response.send_message("Missing", ephemeral=True)
+                except Exception:
+                    return
+            btns = panels[panel_id].get("buttons", [])
+            if btn_idx >= len(btns):
+                try:
+                    if not interaction.response.is_done():
+                        return await interaction.response.send_message("Missing", ephemeral=True)
+                except Exception:
+                    return
+            btn = btns[btn_idx]
+            command = btn.get("command", "")
+            fields = btn.get("modal_fields", [])
+            if fields:
+                modal = ContextModal(self, panel_id, btn_idx, command, fields, btn.get("label", ""))
+                try:
+                    if not interaction.response.is_done():
+                        return await interaction.response.send_modal(modal)
+                except Exception:
+                    return
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
+            await self.invoke_command(interaction, command)
+        except Exception as e:
+            log.error(f"button_clicked error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Error", ephemeral=True)
+                else:
+                    await interaction.followup.send("Error", ephemeral=True)
+            except Exception:
+                pass
+
+    async def invoke_command(self, interaction: discord.Interaction, command: str):
+        try:
+            prefix = "!"
+            cmd_clean = command.strip()
+            while cmd_clean and cmd_clean[0] in "!.?/\\-~+><":
+                cmd_clean = cmd_clean[1:].strip()
+            full = f"{prefix}{cmd_clean}"
+            msg = interaction.message
+            if not msg:
+                try:
+                    await interaction.followup.send(full, ephemeral=True)
+                    return
+                except Exception:
+                    return
+            # Try to make a new message-like context
+            try:
+                # For Red, we can use bot.get_context on the message but override
+                msg.content = full
+            except Exception:
+                pass
+            try:
+                ctx = await self.bot.get_context(msg)
+                ctx.author = interaction.user
+                ctx.channel = interaction.channel
+                ctx.guild = interaction.guild
+                if ctx.message:
+                    ctx.message.content = full
+                    ctx.message.author = interaction.user
+                    ctx.message.channel = interaction.channel
+                    ctx.message.guild = interaction.guild
+                if ctx.command and ctx.valid:
+                    await self.bot.invoke(ctx)
+                    return
+                # Rebuild context
+                ctx2 = await self.bot.get_context(ctx.message)
+                ctx2.author = interaction.user
+                ctx2.channel = interaction.channel
+                ctx2.guild = interaction.guild
+                if ctx2.command and ctx2.valid:
+                    await self.bot.invoke(ctx2)
+                    return
+                await self.bot.process_commands(ctx2.message)
+                return
+            except Exception as e:
+                try:
+                    await interaction.followup.send(full, ephemeral=True)
+                    return
+                except Exception:
+                    pass
+                return
+        except Exception as e:
+            try:
+                await interaction.followup.send("Error", ephemeral=True)
+            except Exception:
+                pass
+
