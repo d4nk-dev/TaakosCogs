@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.13.0
+
+- **Event management is locked to the event's creator and officers.** Every button in an event's Manage menu (and its edit forms) only works for the member who created the event or a member with the officer role (default role ID `1562187200081428490`). Other staff, including admins and people with Manage Events, are told so and nothing changes. Members with the officer role can also start new events and see every draft; creators only see their own drafts in the **Drafts** list.
+- New command `officerrole [@role]` (needs Manage Server) to show or change which role counts as officer. Events whose creator's data was deleted can only be managed by officers.
+- The commands (`list`, `stats`, `export`, `post`, `checkin`, `repeat`, ...) still use their usual Manage Events / admin permission; only the buttons are locked down.
+
 ## 1.12.2
 
 - Fix: 1.12.1 failed to load (`No module named 'eventcheckin.images'`) if the new `images.py` file wasn't copied across. The image checker now lives inside `eventcheckin.py`, so updating that one file is enough. Delete `images.py` from your `eventcheckin/` folder if you added it.

@@ -2,6 +2,10 @@
 
 Create events from a button and a form, let members RSVP, pick roles and confirm requirements, check in on the day, and see who showed up. Everything day-to-day is menus and buttons; there are only a few commands, for setup and reports.
 
+## Who can do what
+
+Creating an event needs **Manage Events** or the officer role. Once it exists, its Manage menu works only for the member who created it and members with the officer role (change it with `[p]eventcheckin officerrole @role`).
+
 ## Setup (once)
 
 ```text

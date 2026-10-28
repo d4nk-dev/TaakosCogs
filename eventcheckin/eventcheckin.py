@@ -39,6 +39,7 @@ HAS_LABEL = hasattr(discord.ui, "Label")
 MAX_REQUIREMENTS = 10
 REQUIREMENT_LENGTH = 80  # a requirement is also a button label, which Discord caps at 80
 MAX_PING_ROLES = 10
+DEFAULT_OFFICER_ROLE_ID = 1562187200081428490  # members with this role may manage any event
 MAX_ROLES = 10
 MAX_ROLE_REQUIREMENTS = 5
 ROLE_NAME_LENGTH = 40
@@ -1020,6 +1021,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             checkin_late_minutes=720,
             log_channel_id=None,
             announce_channel_id=None,
+            officer_role_id=DEFAULT_OFFICER_ROLE_ID,
             timezone="UTC",
             templates={},
             events={},
@@ -1509,6 +1511,18 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             return True
         return await self.bot.is_owner(member) or await self.bot.is_admin(member)
 
+    async def _can_create_events(self, member: discord.Member) -> bool:
+        """Who may start a new event: Manage Events (as before) or the officer role."""
+        return await self._can_manage_events(member) or await self._is_officer(member)
+
+    async def _is_officer(self, member: discord.Member) -> bool:
+        role_id = await self.config.guild(member.guild).officer_role_id()
+        return bool(role_id) and any(getattr(role, "id", None) == role_id for role in getattr(member, "roles", []) or [])
+
+    async def _can_manage_event(self, member: discord.Member, event: dict[str, Any]) -> bool:
+        """Only the person who made the event, or an officer, may use its management buttons."""
+        return event.get("created_by") == member.id or await self._is_officer(member)
+
     async def _guild_zone(self, guild: discord.Guild) -> tuple[str, ZoneInfo]:
         name = await self.config.guild(guild).timezone()
         try:
@@ -1537,8 +1551,8 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.followup.send("Events can only be created in a server.", ephemeral=True)
             return
-        if not await self._can_manage_events(interaction.user):
-            await interaction.followup.send("You need the **Manage Events** permission to create events.", ephemeral=True)
+        if not await self._can_create_events(interaction.user):
+            await interaction.followup.send("You need the **Manage Events** permission (or the officer role) to create events.", ephemeral=True)
             return
         templates = await self.config.guild(interaction.guild).templates()
         default = await self._announce_destination(interaction.guild, interaction.channel)
@@ -1554,8 +1568,8 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         """Open the create form, prefilled from a template (or blank when ``key`` is None)."""
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return
-        if not await self._can_manage_events(interaction.user):
-            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
+        if not await self._can_create_events(interaction.user):
+            await interaction.response.send_message("You need the **Manage Events** permission (or the officer role) to do that.", ephemeral=True)
             return
         defaults: dict[str, str] = {}
         if key:
@@ -1576,8 +1590,8 @@ class EventCheckin(DashboardIntegration, commands.Cog):
     async def handle_create_submit(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
         guild = interaction.guild
         member = interaction.user
-        if not guild or not isinstance(member, discord.Member) or not await self._can_manage_events(member):
-            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
+        if not guild or not isinstance(member, discord.Member) or not await self._can_create_events(member):
+            await interaction.response.send_message("You need the **Manage Events** permission (or the officer role) to do that.", ephemeral=True)
             return
 
         timezone_name, zone = await self._guild_zone(guild)
@@ -1658,23 +1672,17 @@ class EventCheckin(DashboardIntegration, commands.Cog):
     async def open_edit_modal(self, interaction: discord.Interaction, event_id: int) -> None:
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return
-        if not await self._can_manage_events(interaction.user):
-            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
-            return
-        try:
-            _events, event = await self._event(interaction.guild, event_id)
-        except commands.BadArgument:
-            await interaction.response.send_message("That event no longer exists.", ephemeral=True)
-            return
-        await interaction.response.send_modal(EditEventModal(self, event))
+        context = await self._staff_event(interaction, event_id)
+        if context is not None:
+            await interaction.response.send_modal(EditEventModal(self, context[3]))
 
     async def handle_edit_submit(
         self, interaction: discord.Interaction, event_id: int, title: str, description: str, location: str
     ) -> None:
-        guild = interaction.guild
-        if not guild or not isinstance(interaction.user, discord.Member) or not await self._can_manage_events(interaction.user):
-            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
             return
+        guild = context[0]
         async with self._lock(guild.id):
             try:
                 events, event = await self._event(guild, event_id)
@@ -1694,8 +1702,8 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         """Common guard: staff member, in a guild, event exists. Replies and returns None otherwise."""
         guild = interaction.guild
         member = interaction.user
-        if not guild or not isinstance(member, discord.Member) or not await self._can_manage_events(member):
-            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
+        if not guild or not isinstance(member, discord.Member):
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
             return None
         try:
             if event_id is None:
@@ -1706,6 +1714,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 events, event = await self._event(guild, event_id)
         except commands.BadArgument as error:
             await interaction.response.send_message(str(error), ephemeral=True)
+            return None
+        if not await self._can_manage_event(member, event):
+            await interaction.response.send_message("Only the person who created this event, or an officer, can do that.", ephemeral=True)
             return None
         return guild, member, events, event
 
@@ -1744,12 +1755,19 @@ class EventCheckin(DashboardIntegration, commands.Cog):
     async def open_drafts(self, interaction: discord.Interaction) -> None:
         await self._ack(interaction)
         guild = interaction.guild
-        if not guild or not isinstance(interaction.user, discord.Member) or not await self._can_manage_events(interaction.user):
-            await interaction.followup.send("You need the **Manage Events** permission to do that.", ephemeral=True)
+        if not guild or not isinstance(interaction.user, discord.Member) or not await self._can_create_events(interaction.user):
+            await interaction.followup.send("You need the **Manage Events** permission (or the officer role) to do that.", ephemeral=True)
             return
         events = await self.config.guild(guild).events()
+        officer = await self._is_officer(interaction.user)
         drafts = sorted(
-            (event for event in events.values() if event.get("status") == "draft" and not event.get("message_id")),
+            (
+                event
+                for event in events.values()
+                if event.get("status") == "draft"
+                and not event.get("message_id")
+                and (officer or event.get("created_by") == interaction.user.id)
+            ),
             key=lambda event: int(event["starts_at"]),
         )
         if not drafts:
@@ -2671,10 +2689,10 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         return notified
 
     async def handle_discord_event_button(self, interaction: discord.Interaction, event_id: int) -> None:
-        guild = interaction.guild
-        if not guild or not isinstance(interaction.user, discord.Member) or not await self._can_manage_events(interaction.user):
-            await interaction.response.send_message("You need the **Manage Events** permission to do that.", ephemeral=True)
+        context = await self._staff_event(interaction, event_id)
+        if context is None:
             return
+        guild = context[0]
         await interaction.response.defer(ephemeral=True)
         try:
             scheduled = await self._create_discord_event(guild, event_id, interaction.user)
@@ -3024,6 +3042,21 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             await self._say(ctx, f"New events will be posted in {channel.mention}.")
         else:
             await self._say(ctx, "New events will be posted in the channel where the form is opened.")
+
+    @event_checkin.command(name="officerrole")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def officer_role(self, ctx: commands.Context, role: discord.Role | None = None) -> None:
+        """Set the role that may manage any event (besides its creator). Leave empty to show or clear."""
+        conf = self.config.guild(ctx.guild).officer_role_id
+        if role is None:
+            current = ctx.guild.get_role(await conf())
+            await self._say(
+                ctx,
+                f"Officers: {current.mention}. Run `officerrole @role` to change it." if current else "No officer role is set; only an event's creator can manage it.",
+            )
+            return
+        await conf.set(role.id)
+        await self._say(ctx, f"Members with {role.mention} can now manage any event, along with each event's creator.")
 
     @event_checkin.command(name="rewardrole")
     @commands.admin_or_permissions(manage_roles=True)
