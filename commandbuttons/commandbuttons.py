@@ -549,13 +549,19 @@ class CommandButtons(commands.Cog):
             # Determine prefix
             prefix = "!"
             try:
-                if isinstance(self.bot.command_prefix, (list, tuple, set)):
-                    for p in self.bot.command_prefix:
-                        if p:
+                cp = self.bot.command_prefix
+                if callable(cp):
+                    try:
+                        cp = cp(self.bot, msg)
+                    except Exception:
+                        cp = "!"
+                if isinstance(cp, (list, tuple, set)):
+                    for p in cp:
+                        if p and isinstance(p, str):
                             prefix = p
                             break
-                elif self.bot.command_prefix:
-                    prefix = self.bot.command_prefix
+                elif isinstance(cp, str):
+                    prefix = cp
             except Exception:
                 prefix = "!"
             # Ensure command doesn't already have prefix
