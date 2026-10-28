@@ -113,13 +113,16 @@ class PanelManagerView(discord.ui.View):
         if interaction.user.id != self.ctx.author.id:
             try:
                 if not interaction.response.is_done():
-                    return await interaction.response.send_message("Not for you.", ephemeral=True)
+                    await interaction.response.send_message("Not for you.", ephemeral=True)
+                return
             except Exception:
                 return
         try:
             modal = CreatePanelModal(self.cog)
             if not interaction.response.is_done():
                 await interaction.response.send_modal(modal)
+            else:
+                await interaction.followup.send_modal(modal)
         except Exception:
             pass
 
@@ -128,13 +131,16 @@ class PanelManagerView(discord.ui.View):
         if interaction.user.id != self.ctx.author.id:
             try:
                 if not interaction.response.is_done():
-                    return await interaction.response.send_message("Not for you.", ephemeral=True)
+                    await interaction.response.send_message("Not for you.", ephemeral=True)
+                return
             except Exception:
                 return
         try:
             modal = QuickManageModal(self.cog)
             if not interaction.response.is_done():
                 await interaction.response.send_modal(modal)
+            else:
+                await interaction.followup.send_modal(modal)
         except Exception:
             pass
 
@@ -143,13 +149,16 @@ class PanelManagerView(discord.ui.View):
         if interaction.user.id != self.ctx.author.id:
             try:
                 if not interaction.response.is_done():
-                    return await interaction.response.send_message("Not for you.", ephemeral=True)
+                    await interaction.response.send_message("Not for you.", ephemeral=True)
+                return
             except Exception:
                 return
         try:
             modal = PostPanelModal(self.cog)
             if not interaction.response.is_done():
                 await interaction.response.send_modal(modal)
+            else:
+                await interaction.followup.send_modal(modal)
         except Exception:
             pass
 
