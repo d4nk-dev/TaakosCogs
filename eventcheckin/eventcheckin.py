@@ -6,21 +6,26 @@ import asyncio
 import copy
 import csv
 import io
+import ipaddress
 import logging
+import socket
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import aiohttp
 import discord
 from discord.ext import tasks
 from redbot.core import Config, commands
 
 from .calendar_utils import build_calendar
 from .dashboard_integration import DashboardIntegration
-from .images import resolve_image
 from .parsing import ParseError, parse_capacity, parse_duration, parse_start
 
 if TYPE_CHECKING:
@@ -51,6 +56,125 @@ def add_text_field(
         field = discord.ui.TextInput(label=label[:45], **kwargs)
         modal.add_item(field)
     return field
+
+
+# ---- image link checking ----------------------------------------------------------------------
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+MAX_PAGE_BYTES = 512 * 1024
+USER_AGENT = "Mozilla/5.0 (compatible; EventCheckin Discord bot link check)"
+COPY_HINT = "Right-click the picture and choose **Copy image address**, then paste that link."
+
+
+@dataclass
+class ImageResult:
+    ok: bool
+    url: str | None = None
+    message: str = ""
+    checked: bool = True  # False when the site could not be reached to verify the link
+    from_page: bool = False  # the link was a web page and the picture was found on it
+
+
+class _MetaImageParser(HTMLParser):
+    """Collect og:image / twitter:image / image_src candidates from a page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.candidates: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): (value or "") for key, value in attrs}
+        if tag == "meta":
+            key = (values.get("property") or values.get("name") or "").lower()
+            if key in {"og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"} and values.get("content"):
+                self.candidates.append(values["content"].strip())
+        elif tag == "link" and "image_src" in values.get("rel", "").lower() and values.get("href"):
+            self.candidates.append(values["href"].strip())
+
+
+async def host_is_public(host: str) -> bool:
+    """False for localhost, private and link-local addresses, so staff can't point the bot at internal services."""
+    if not host:
+        return False
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError:
+            return False
+        addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
+    return bool(addresses) and all(address.is_global for address in addresses)
+
+
+def _looks_like_image_path(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(IMAGE_EXTENSIONS)
+
+
+async def _inspect(
+    session: aiohttp.ClientSession, url: str, host_check: Callable[[str], Awaitable[bool]]
+) -> tuple[str, str | None, str | None]:
+    """Return (kind, final_url, page_html). kind is image, page, svg, missing, blocked, other or unreachable."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not await host_check(parsed.hostname or ""):
+        return "unreachable", None, None
+    try:
+        async with session.get(url, allow_redirects=True) as response:
+            if not await host_check(response.url.host or ""):
+                return "unreachable", None, None
+            final = str(response.url)
+            kind = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if response.status in {404, 410}:
+                return "missing", final, None
+            if response.status in {401, 403, 429}:
+                return "blocked", final, None
+            if response.status >= 400:
+                return "other", final, None
+            if kind == "image/svg+xml":
+                return "svg", final, None
+            if kind.startswith("image/"):
+                return "image", final, None
+            if kind in {"text/html", "application/xhtml+xml"}:
+                raw = await response.content.read(MAX_PAGE_BYTES)
+                return "page", final, raw.decode(response.charset or "utf-8", errors="replace")
+            if kind in {"", "application/octet-stream", "binary/octet-stream"} and _looks_like_image_path(final):
+                return "image", final, None
+            return "other", final, None
+    except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError):
+        return "unreachable", None, None
+
+
+async def resolve_image(
+    url: str, *, host_check: Callable[[str], Awaitable[bool]] = host_is_public, timeout: float = 8.0
+) -> ImageResult:
+    """Confirm ``url`` is an image Discord can show; if it is a web page, use the picture the page advertises."""
+    timeout_config = aiohttp.ClientTimeout(total=timeout)
+    async with aiohttp.ClientSession(timeout=timeout_config, headers={"User-Agent": USER_AGENT}) as session:
+        kind, final, html = await _inspect(session, url, host_check)
+        if kind == "image":
+            return ImageResult(True, url)
+        if kind == "page" and html is not None:
+            parser = _MetaImageParser()
+            try:
+                parser.feed(html)
+            except Exception:  # noqa: BLE001 - malformed pages must never break the form
+                pass
+            for candidate in parser.candidates[:5]:
+                candidate_url = urljoin(final or url, candidate)
+                sub_kind, _sub_final, _ = await _inspect(session, candidate_url, host_check)
+                if sub_kind in {"image", "blocked"} and len(candidate_url) <= 500:
+                    return ImageResult(True, candidate_url, from_page=True, checked=sub_kind == "image")
+            return ImageResult(False, message=f"That link is a web page, and I couldn't find a picture on it. {COPY_HINT}")
+        if kind == "svg":
+            return ImageResult(False, message="Discord can't show SVG images. Use a PNG, JPG, GIF or WebP link.")
+        if kind == "missing":
+            return ImageResult(False, message="That link doesn't exist any more (404). Check it and try again.")
+        if kind == "blocked":
+            # The site refuses bots; Discord's own servers may still be allowed, so accept but say so.
+            return ImageResult(True, url, checked=False)
+        if kind == "other":
+            return ImageResult(False, message=f"That link isn't an image. {COPY_HINT}")
+        return ImageResult(True, url, checked=False)  # couldn't reach it from here; let Discord try
 
 
 class EventControls(discord.ui.View):
