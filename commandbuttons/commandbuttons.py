@@ -378,3 +378,210 @@ class CommandButtons(commands.Cog):
                 await interaction.followup.send(f"Error: {e}", ephemeral=True)
             except Exception:
                 pass
+
+
+    @cbuttons.command(name="list")
+    async def cbuttons_list(self, ctx: commands.Context):
+        """List all panels in this guild."""
+        panels = await self.config.guild(ctx.guild).panels()
+        if not panels:
+            return await ctx.send("No panels found.")
+        embed = discord.Embed(title="Command Button Panels", color=await ctx.embed_color())
+        for pid, panel in panels.items():
+            btn_count = len(panel.get("buttons", []))
+            sticky_info = ""
+            sticky = await self.config.guild(ctx.guild).sticky()
+            for ch_id, cfg in sticky.items():
+                if cfg.get("panel_id") == pid:
+                    sticky_info = f"\nSticky: <#{ch_id}>"
+                    break
+            ch_info = f"<#{panel.get('channel_id')}>" if panel.get('channel_id') else "Not posted"
+            embed.add_field(
+                name=f"{panel.get('name')} (`{pid}`)",
+                value=f"Buttons: {btn_count}{sticky_info}\nChannel: {ch_info}",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    @cbuttons.command(name="view")
+    async def cbuttons_view(self, ctx: commands.Context, panel_id: str):
+        """View panel details and buttons."""
+        panels = await self.config.guild(ctx.guild).panels()
+        if panel_id not in panels:
+            return await ctx.send("Panel not found.")
+        panel = panels[panel_id]
+        embed = discord.Embed(title=panel.get("name"), description=panel.get("description") or "", color=await ctx.embed_color())
+        buttons = panel.get("buttons", [])
+        if not buttons:
+            embed.add_field(name="Buttons", value="None", inline=False)
+        else:
+            for i, btn in enumerate(buttons):
+                modal = " (modal)" if btn.get("modal_fields") else ""
+                embed.add_field(
+                    name=f"{i}: {btn.get('label')}",
+                    value=f"Command: `{btn.get('command')}`{modal} [style: {btn.get('style')}]",
+                    inline=False,
+                )
+        await ctx.send(embed=embed)
+
+    @cbuttons.command(name="delete")
+    async def cbuttons_delete(self, ctx: commands.Context, panel_id: str):
+        """Delete a panel."""
+        panels = await self.config.guild(ctx.guild).panels()
+        if panel_id not in panels:
+            return await ctx.send("Panel not found.")
+        panel = panels[panel_id]
+        # Remove sticky if set to this panel
+        sticky = await self.config.guild(ctx.guild).sticky()
+        to_del = []
+        for ch_id, cfg in sticky.items():
+            if cfg.get("panel_id") == panel_id:
+                to_del.append(ch_id)
+        for ch_id in to_del:
+            sticky.pop(ch_id)
+        if to_del:
+            await self.config.guild(ctx.guild).sticky.set(sticky)
+        # Try to delete message if exists
+        if panel.get("channel_id") and panel.get("message_id"):
+            try:
+                ch = ctx.guild.get_channel(panel["channel_id"])
+                if ch:
+                    msg = ch.get_partial_message(panel["message_id"])
+                    await msg.delete()
+            except Exception:
+                pass
+        del panels[panel_id]
+        await self.config.guild(ctx.guild).panels.set(panels)
+        await ctx.send(f"Deleted panel `{panel_id}`.")
+
+    @cbuttons.command(name="removebutton")
+    async def cbuttons_removebutton(self, ctx: commands.Context, panel_id: str, index: int):
+        """Remove a button by index."""
+        panels = await self.config.guild(ctx.guild).panels()
+        if panel_id not in panels:
+            return await ctx.send("Panel not found.")
+        buttons = panels[panel_id]["buttons"]
+        if index < 0 or index >= len(buttons):
+            return await ctx.send("Invalid index.")
+        removed = buttons.pop(index)
+        await self.config.guild(ctx.guild).panels.set(panels)
+        await ctx.send(f"Removed button '{removed.get('label')}'.")
+        # Update posted message if exists
+        panel = panels[panel_id]
+        if panel.get("channel_id") and panel.get("message_id") and buttons:
+            try:
+                ch = ctx.guild.get_channel(panel["channel_id"])
+                if ch:
+                    view = PanelButtonView(self, panel_id, buttons)
+                    msg = await ch.fetch_message(panel["message_id"])
+                    await msg.edit(view=view)
+                    self.bot.add_view(view, message_id=msg.id)
+            except Exception:
+                pass
+        elif panel.get("channel_id") and panel.get("message_id") and not buttons:
+            try:
+                ch = ctx.guild.get_channel(panel["channel_id"])
+                if ch:
+                    msg = ch.get_partial_message(panel["message_id"])
+                    await msg.edit(view=None)
+            except Exception:
+                pass
+
+    @cbuttons.command(name="editbutton")
+    async def cbuttons_editbutton(self, ctx: commands.Context, panel_id: str, index: int):
+        """Edit a button interactively."""
+        panels = await self.config.guild(ctx.guild).panels()
+        if panel_id not in panels:
+            return await ctx.send("Panel not found.")
+        buttons = panels[panel_id]["buttons"]
+        if index < 0 or index >= len(buttons):
+            return await ctx.send("Invalid index.")
+        btn = buttons[index]
+
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        await ctx.send(f"Current label: {btn.get('label')}\nNew label (or 'skip'):")
+        try:
+            m = await self.bot.wait_for("message", check=check, timeout=60)
+            if m.content.strip().lower() != 'skip':
+                btn['label'] = m.content.strip()
+        except Exception:
+            pass
+
+        await ctx.send(f"Current command: {btn.get('command')}\nNew command (or 'skip'):")
+        try:
+            m = await self.bot.wait_for("message", check=check, timeout=120)
+            if m.content.strip().lower() != 'skip':
+                btn['command'] = m.content.strip()
+        except Exception:
+            pass
+
+        await ctx.send(f"Current style: {btn.get('style')}\nNew style (or 'skip'):")
+        try:
+            m = await self.bot.wait_for("message", check=check, timeout=30)
+            if m.content.strip().lower() != 'skip':
+                btn['style'] = m.content.strip().lower()
+        except Exception:
+            pass
+
+        panels[panel_id]["buttons"][index] = btn
+        await self.config.guild(ctx.guild).panels.set(panels)
+        await ctx.send("Button updated.")
+        # Update message
+        panel = panels[panel_id]
+        if panel.get("channel_id") and panel.get("message_id"):
+            try:
+                ch = ctx.guild.get_channel(panel["channel_id"])
+                if ch:
+                    view = PanelButtonView(self, panel_id, panels[panel_id]["buttons"])
+                    msg = await ch.fetch_message(panel["message_id"])
+                    await msg.edit(view=view)
+                    self.bot.add_view(view, message_id=msg.id)
+            except Exception:
+                pass
+
+    async def invoke_command(self, interaction: discord.Interaction, command: str):
+        try:
+            msg = interaction.message
+            if not msg:
+                return await interaction.followup.send("Cannot invoke command.", ephemeral=True)
+            # Determine prefix
+            prefix = "!"
+            try:
+                if isinstance(self.bot.command_prefix, (list, tuple, set)):
+                    for p in self.bot.command_prefix:
+                        if p:
+                            prefix = p
+                            break
+                elif self.bot.command_prefix:
+                    prefix = self.bot.command_prefix
+            except Exception:
+                prefix = "!"
+            # Ensure command doesn't already have prefix
+            cmd_clean = command.strip()
+            if cmd_clean.startswith(prefix):
+                cmd_clean = cmd_clean[len(prefix):].strip()
+            ctx = await self.bot.get_context(msg)
+            # Build new message content
+            new_content = f"{prefix}{cmd_clean}"
+            # Create a fake message object by copying
+            class FakeMessage:
+                pass
+            # Easier: just set content on a copy approach - use the original message's channel/guild
+            ctx.message.content = new_content
+            ctx2 = await self.bot.get_context(ctx.message)
+            ctx2.author = interaction.user
+            ctx2.channel = interaction.channel
+            ctx2.guild = interaction.guild
+            if ctx2.valid and ctx2.command:
+                await self.bot.invoke(ctx2)
+                return
+            # Try to process directly
+            await self.bot.process_commands(ctx2.message)
+            return
+        except Exception as e:
+            try:
+                await interaction.followup.send(f"Error: {e}", ephemeral=True)
+            except Exception:
+                pass
