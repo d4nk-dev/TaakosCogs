@@ -427,7 +427,22 @@ class PanelSelectViewDynamic(discord.ui.View):
         self.cog = cog
         self.ctx = ctx
         self.action = action
-        self.add_item(DynamicPanelSelect(cog, ctx, action))
+        self.select = DynamicPanelSelect(cog, ctx, action)
+        self.add_item(self.select)
+        self.ctx.bot.loop.create_task(self._populate())
+
+    async def _populate(self):
+        try:
+            panels = await self.cog.config.guild(self.ctx.guild).panels()
+            options = []
+            for pid, panel in panels.items():
+                options.append(discord.SelectOption(label=f"{panel.get('name')} [{pid}]", value=pid))
+            if not options:
+                options = [discord.SelectOption(label="No panels", value="__none__")]
+            self.select.options = options
+            self.select.placeholder = "Select panel..."
+        except Exception:
+            pass
 
 
 class DynamicPanelSelect(discord.ui.Select):
@@ -435,8 +450,9 @@ class DynamicPanelSelect(discord.ui.Select):
         self.cog = cog
         self.ctx = ctx
         self.action = action
-        # Will be updated
-        super().__init__(placeholder="Select panel...", min_values=1, max_values=1, options=[discord.SelectOption(label="Loading", value="x")])
+        # Start with empty, will be replaced
+        options = [discord.SelectOption(label="Loading...", value="__loading__")]
+        super().__init__(placeholder="Select panel...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.ctx.author.id:
@@ -446,8 +462,12 @@ class DynamicPanelSelect(discord.ui.Select):
             except Exception:
                 return
         panel_id = self.values[0]
-        if panel_id == "x":
-            return
+        if panel_id in ("x", "__loading__", "__none__"):
+            try:
+                if not interaction.response.is_done():
+                    return await interaction.response.send_message("No panels available.", ephemeral=True)
+            except Exception:
+                return
         if self.action == "view":
             panels = await self.cog.config.guild(interaction.guild).panels()
             panel = panels.get(panel_id)
