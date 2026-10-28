@@ -546,10 +546,9 @@ class CommandButtons(commands.Cog):
             msg = interaction.message
             if not msg:
                 return await interaction.followup.send("Cannot invoke command.", ephemeral=True)
-            # Determine prefix
             prefix = "!"
             try:
-                cp = self.bot.command_prefix
+                cp = getattr(self.bot, "command_prefix", "!")
                 if callable(cp):
                     try:
                         cp = cp(self.bot, msg)
@@ -557,25 +556,26 @@ class CommandButtons(commands.Cog):
                         cp = "!"
                 if isinstance(cp, (list, tuple, set)):
                     for p in cp:
-                        if p and isinstance(p, str):
+                        if isinstance(p, str) and p:
                             prefix = p
                             break
                 elif isinstance(cp, str):
                     prefix = cp
             except Exception:
                 prefix = "!"
-            # Ensure command doesn't already have prefix
             cmd_clean = command.strip()
-            if cmd_clean.startswith(prefix):
-                cmd_clean = cmd_clean[len(prefix):].strip()
+            for p in [prefix, "!", ".", "?"]:
+                if isinstance(p, str) and cmd_clean.startswith(p):
+                    cmd_clean = cmd_clean[len(p):].strip()
+                    break
+            # Get a context and override
             ctx = await self.bot.get_context(msg)
-            # Build new message content
-            new_content = f"{prefix}{cmd_clean}"
-            # Create a fake message object by copying
-            class FakeMessage:
-                pass
-            # Easier: just set content on a copy approach - use the original message's channel/guild
-            ctx.message.content = new_content
+            # Override message content and author
+            ctx.message.content = f"{prefix}{cmd_clean}"
+            ctx.author = interaction.user
+            ctx.channel = interaction.channel
+            ctx.guild = interaction.guild
+            # Re-get context with new content
             ctx2 = await self.bot.get_context(ctx.message)
             ctx2.author = interaction.user
             ctx2.channel = interaction.channel
@@ -583,7 +583,7 @@ class CommandButtons(commands.Cog):
             if ctx2.valid and ctx2.command:
                 await self.bot.invoke(ctx2)
                 return
-            # Try to process directly
+            # Try process_commands as fallback
             await self.bot.process_commands(ctx2.message)
             return
         except Exception as e:
