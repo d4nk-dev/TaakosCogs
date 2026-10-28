@@ -137,10 +137,16 @@ class PanelManagerView(discord.ui.View):
                 return
         try:
             modal = QuickManageModal(self.cog)
-            if not interaction.response.is_done():
-                await interaction.response.send_modal(modal)
-            else:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_modal(modal)
+                    return
+            except Exception:
+                pass
+            try:
                 await interaction.followup.send_modal(modal)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -687,3 +693,18 @@ class CommandButtons(commands.Cog):
             except Exception:
                 pass
 
+
+
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.command(name="cbuttonsmanage")
+    async def cbuttons_manage_cmd(self, ctx: commands.Context):
+        """Manage panels directly via modal."""
+        try:
+            modal = QuickManageModal(self)
+            if ctx.interaction:
+                await ctx.interaction.response.send_modal(modal)
+            else:
+                await ctx.send("Use slash or this command in interaction context. Also use `!cbuttons` UI.")
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
