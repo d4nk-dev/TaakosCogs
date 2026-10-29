@@ -99,8 +99,24 @@ class ManagerView(discord.ui.View):
     @discord.ui.button(label="Add Button", style=discord.ButtonStyle.success, row=1)
     async def addb(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.ctx.author.id:
-            return await interaction.response.send_message("No", ephemeral=True)
-        await interaction.response.send_modal(AddModal(self.cog))
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("No", ephemeral=True)
+                return
+            except Exception:
+                return
+        try:
+            modal = AddModal(self.cog)
+            if not interaction.response.is_done():
+                await interaction.response.send_modal(modal)
+                return
+        except Exception:
+            pass
+        try:
+            await interaction.followup.send_modal(modal)
+            return
+        except Exception:
+            pass
 
     @discord.ui.button(label="Remove Button", style=discord.ButtonStyle.danger, row=1)
     async def remb(self, interaction: discord.Interaction, button: discord.ui.Button):
