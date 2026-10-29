@@ -460,7 +460,7 @@ class CommandButtons(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not message.guild or message.author.bot:
+        if not message.guild:
             return
         if isinstance(message.channel, discord.abc.PrivateChannel):
             return
@@ -469,7 +469,19 @@ class CommandButtons(commands.Cog):
             cfg = sticky.get(str(message.channel.id))
             if not cfg:
                 return
-            await self._repost(message.guild, message.channel, cfg["panel_id"])
+            panel_id = cfg["panel_id"]
+            panels = await self.config.guild(message.guild).panels()
+            if panel_id not in panels:
+                return
+            panel = panels[panel_id]
+            last_id = panel.get("sticky_last_id") or panel.get("message_id")
+            # If last message isn't ours, repost
+            if last_id and message.id == last_id:
+                return
+            if last_id and message.author.id == self.bot.user.id and message.id == last_id:
+                return
+            # Check - if the message isn't ours, repost
+            await self._repost(message.guild, message.channel, panel_id)
         except Exception:
             pass
 
@@ -493,7 +505,8 @@ class CommandButtons(commands.Cog):
                 if panel_id not in panels:
                     return
                 panel = panels[panel_id]
-                old_id = panel.get("sticky_last_id")
+                # Don't repost if our message is already last? Or always repost to be at bottom
+                old_id = panel.get("sticky_last_id") or panel.get("message_id")
                 if old_id:
                     try:
                         old_msg = channel.get_partial_message(old_id)
