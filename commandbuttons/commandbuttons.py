@@ -474,13 +474,12 @@ class CommandButtons(commands.Cog):
             if panel_id not in panels:
                 return
             panel = panels[panel_id]
-            last_id = panel.get("sticky_last_id") or panel.get("message_id")
-            # If last message isn't ours, repost
-            if last_id and message.id == last_id:
+            panel_msg_id = panel.get("sticky_last_id") or panel.get("message_id")
+            if not panel_msg_id:
                 return
-            if last_id and message.author.id == self.bot.user.id and message.id == last_id:
+            if message.id == panel_msg_id:
                 return
-            # Check - if the message isn't ours, repost
+            # If the latest message in channel is different from our panel message, repost
             await self._repost(message.guild, message.channel, panel_id)
         except Exception:
             pass
@@ -505,9 +504,17 @@ class CommandButtons(commands.Cog):
                 if panel_id not in panels:
                     return
                 panel = panels[panel_id]
-                # Don't repost if our message is already last? Or always repost to be at bottom
                 old_id = panel.get("sticky_last_id") or panel.get("message_id")
+                # Only repost if our message is not the last message
                 if old_id:
+                    try:
+                        # Try to get last message
+                        async for m in channel.history(limit=1):
+                            if m.id == old_id:
+                                return  # Our message is still last, don't repost
+                            break
+                    except Exception:
+                        pass
                     try:
                         old_msg = channel.get_partial_message(old_id)
                         await old_msg.delete()
