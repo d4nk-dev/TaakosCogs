@@ -170,9 +170,7 @@ class AddModal(discord.ui.Modal, title="Add Button"):
     panel_id = discord.ui.TextInput(label="Panel ID", required=True)
     label = discord.ui.TextInput(label="Button Label", required=True)
     command = discord.ui.TextInput(label="Command (without !)", required=True)
-    style = discord.ui.TextInput(label="primary/secondary/success/danger", required=False)
-    need_modal = discord.ui.TextInput(label="Modal? (yes/no)", required=False)
-    fields = discord.ui.TextInput(label="Field labels comma sep", required=False, style=discord.TextStyle.paragraph)
+    style = discord.ui.TextInput(label="Style", required=False)
 
     def __init__(self, cog):
         super().__init__(timeout=600)
@@ -187,14 +185,7 @@ class AddModal(discord.ui.Modal, title="Add Button"):
         lbl = str(self.label.value).strip()
         cmd = str(self.command.value).strip()
         st = str(self.style.value or "secondary").strip().lower()
-        need = str(self.need_modal.value or "no").lower() in ("yes", "y")
-        flds = []
-        if need and self.fields.value:
-            for f in str(self.fields.value).split(","):
-                f = f.strip()
-                if f:
-                    flds.append({"label": f, "required": True})
-        panels[pid]["buttons"].append({"label": lbl, "command": cmd, "style": st, "modal_fields": flds})
+        panels[pid]["buttons"].append({"label": lbl, "command": cmd, "style": st, "modal_fields": []})
         await self.cog.config.guild(interaction.guild).panels.set(panels)
         panel = panels[pid]
         if panel.get("channel_id") and panel.get("message_id"):
@@ -267,8 +258,6 @@ class EditModal(discord.ui.Modal, title="Edit Button"):
     label = discord.ui.TextInput(label="Label", required=False)
     command = discord.ui.TextInput(label="Command", required=False)
     style = discord.ui.TextInput(label="Style", required=False)
-    need_modal = discord.ui.TextInput(label="Modal (yes/no)", required=False)
-    fields = discord.ui.TextInput(label="Fields comma", required=False, style=discord.TextStyle.paragraph)
 
     def __init__(self, cog):
         super().__init__(timeout=600)
@@ -294,17 +283,6 @@ class EditModal(discord.ui.Modal, title="Edit Button"):
             btn["command"] = str(self.command.value).strip()
         if self.style.value and str(self.style.value).strip():
             btn["style"] = str(self.style.value).strip().lower()
-        if self.need_modal.value and str(self.need_modal.value).strip():
-            need = str(self.need_modal.value).strip().lower() in ("yes", "y")
-            if need and self.fields.value and str(self.fields.value).strip():
-                flds = []
-                for f in str(self.fields.value).split(","):
-                    f = f.strip()
-                    if f:
-                        flds.append({"label": f, "required": True})
-                btn["modal_fields"] = flds
-            elif not need:
-                btn["modal_fields"] = []
         btns[idx] = btn
         panels[pid]["buttons"] = btns
         await self.cog.config.guild(interaction.guild).panels.set(panels)
@@ -605,3 +583,51 @@ class CommandButtons(commands.Cog):
                 await interaction.followup.send("Err", ephemeral=True)
             except Exception:
                 pass
+
+
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.command(name="cbaddmodal")
+    async def cbaddmodal(self, ctx: commands.Context, panel_id: str, button_index: int = None):
+        """Add modal fields to a button."""
+        panels = await self.config.guild(ctx.guild).panels()
+        if panel_id not in panels:
+            return await ctx.send("Not found")
+        btns = panels[panel_id]["buttons"]
+        if not btns:
+            return await ctx.send("No buttons")
+        if button_index is None:
+            return await ctx.send("Need index")
+        if button_index < 0 or button_index >= len(btns):
+            return await ctx.send("Bad index")
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+        await ctx.send("Field labels comma separated (e.g. User, Reason):")
+        try:
+            m = await self.bot.wait_for("message", check=check, timeout=60)
+            labels = str(m.content).strip()
+        except Exception:
+            return await ctx.send("Timeout")
+        flds = []
+        for f in labels.split(","):
+            f = f.strip()
+            if f:
+                flds.append({"label": f, "required": True})
+        btns[button_index]["modal_fields"] = flds
+        panels[panel_id]["buttons"] = btns
+        await self.config.guild(ctx.guild).panels.set(panels)
+        panel = panels[panel_id]
+        if panel.get("channel_id") and panel.get("message_id"):
+            try:
+                ch = ctx.guild.get_channel(panel["channel_id"])
+                if ch:
+                    view = PanelView(self, panel_id, btns)
+                    try:
+                        msg = await ch.fetch_message(panel["message_id"])
+                        await msg.edit(view=view)
+                        self.bot.add_view(view, message_id=panel["message_id"])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        await ctx.send("Done")
