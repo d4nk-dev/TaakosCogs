@@ -482,21 +482,22 @@ class CommandButtons(commands.Cog):
             cfg = sticky.get(str(channel.id))
             if not cfg or cfg.get("panel_id") != panel_id:
                 return
-            await asyncio.sleep(cfg.get("cooldown", 3))
+            cooldown = cfg.get("cooldown", 3)
+            await asyncio.sleep(cooldown)
             async with cv:
                 await cv.wait_for(lambda: channel.id not in self.locked)
                 sticky2 = await self.config.guild(guild).sticky()
-                if str(channel.id) not in sticky2:
+                if str(channel.id) not in sticky2 or sticky2[str(channel.id)].get("panel_id") != panel_id:
                     return
                 panels = await self.config.guild(guild).panels()
                 if panel_id not in panels:
                     return
                 panel = panels[panel_id]
-                old = panel.get("sticky_last_id")
-                if old:
+                old_id = panel.get("sticky_last_id")
+                if old_id:
                     try:
-                        m = channel.get_partial_message(old)
-                        await m.delete()
+                        old_msg = channel.get_partial_message(old_id)
+                        await old_msg.delete()
                     except Exception:
                         pass
                 view = PanelView(self, panel_id, panel["buttons"])
