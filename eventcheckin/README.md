@@ -1,6 +1,6 @@
 # EventCheckin
 
-Create events from a button and a form, let members RSVP, pick roles and confirm requirements, check in on the day, and see who showed up. Everything day-to-day is menus and buttons; there are only a few commands, for setup and reports.
+Create events from a button and a form, let members sign up, pick roles and confirm requirements, check in on the day, and see who showed up. Everything day-to-day is menus and buttons; there are only a few commands, for setup and reports.
 
 ## Who can do what
 
@@ -22,7 +22,7 @@ The bot needs View Channel, Send Messages and Embed Links in those channels.
 
 ## Creating an event
 
-Anyone with **Manage Events** clicks **Create Event**. A private step first asks which channel to post in (and, if you have saved templates, which template to start from, or *Blank event*); press **Continue**. The form asks for the title, start time, length, max attendees and location, then the event is saved as a **draft** (nothing is posted). Use the Manage menu to finish it, then **Post to channel**: choose the channel, optionally pick roles to ping, and press **Post now**. The post has RSVP, Withdraw, Check in and Manage buttons. The panel's **Drafts** button reopens any unposted event.
+Anyone with **Manage Events** clicks **Create Event**. A private step first asks which channel to post in (and, if you have saved templates, which template to start from, or *Blank event*); press **Continue**. The form asks for the title, start time, length, max attendees and location, then the event is saved as a **draft** (nothing is posted). Use the Manage menu to finish it, then **Post to channel**: choose the channel, optionally pick roles to ping, and press **Post now**. The post has Signup, Withdraw, Check in and Manage buttons. The panel's **Drafts** button reopens any unposted event.
 
 - Start times: `2026-11-05 19:30`, `5 Nov 7:30pm`, `tomorrow 8pm`, `fri 19:00`.
 - Lengths: `90`, `1h30m`, `2 hours`.
@@ -37,21 +37,21 @@ Every event post has a **Manage** button that only staff can use. You also get t
 |---|---|
 | Edit details | Title, description, location |
 | Image | Set a banner from a link. A direct image link works best; a web page that has a picture also works (the bot finds it). **Remove image** clears it |
-| Requirements | Up to 10 confirmations (one per line). Members must press each one before they can RSVP and again before checking in |
+| Requirements | Up to 10 confirmations (one per line). Members tick each one when they sign up, and again before checking in if you add new ones later |
 | Roles | Up to 10 roles (Tank / Healer / DPS, Driver / Navigator...), each with its own slots and up to 5 requirements |
 | Start event | Locks sign-ups, marks the event started and opens check-in. Members already in can still check in or withdraw |
 | Post to channel | Choose the channel and roles to ping, then publish the draft |
 | Save as template | Saves the setup (including requirements, roles and image link) for the Create Event dropdown. 25 per server |
 | Add to Discord events | Creates a native scheduled event (needs a location) |
 | Attendees | Private list grouped by status, with roles |
-| Finalize | After a confirmation: closes registration, marks confirmed RSVPs who never checked in as no-shows, awards the reward role |
+| Finalize | After a confirmation: closes registration, marks confirmed sign-ups who never checked in as no-shows, awards the reward role |
 | Cancel event | Asks for an optional reason, cancels, notifies everyone who registered |
 
 ## For members
 
-- **RSVP** opens a private walkthrough: (1) tick the event's requirements, (2) pick a role (the dropdown shows how full each is), (3) tick that role's requirements and confirm. Events without roles skip steps 2 and 3.
+- **Signup** opens a private walkthrough: (1) tick the event's requirements, (2) pick a role (the dropdown shows how full each is) or **No role** to just join the event, (3) tick that role's requirements and confirm. Events without roles skip steps 2 and 3.
 - A full role has its own waitlist. When a seat opens, the longest-waiting member of that role is promoted and pinged in the event channel.
-- Pressing RSVP again lets you switch roles. **Withdraw** gives your seat up.
+- Pressing Signup again lets you switch roles (or to No role). **Withdraw** gives your seat up.
 - **Check in** opens before the start time (2 hours by default) and closes after it (12 hours by default).
 - A reminder is posted shortly before the start (60 minutes by default).
 

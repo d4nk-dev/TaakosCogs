@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.14.0
+
+- **No role option.** On events with roles, the sign-up role picker now ends with **No role**. Choosing it joins the event with no role, skipping every role waitlist (the event's overall capacity still applies). Members can switch between a role and No role later. The post lists them under **No role** (and **Waiting, no role**).
+- **Button text:** the post button now says **Signup** instead of RSVP, and messages use the same word. Existing posts keep working.
+- **No more "Created from"** line on the event post.
+
 ## 1.13.0
 
 - **Event management is locked to the event's creator and officers.** Every button in an event's Manage menu (and its edit forms) only works for the member who created the event or a member with the officer role (default role ID `1562187200081428490`). Other staff, including admins and people with Manage Events, are told so and nothing changes. Members with the officer role can also start new events and see every draft; creators only see their own drafts in the **Drafts** list.

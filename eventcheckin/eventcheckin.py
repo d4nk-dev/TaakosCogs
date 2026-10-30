@@ -39,6 +39,7 @@ HAS_LABEL = hasattr(discord.ui, "Label")
 MAX_REQUIREMENTS = 10
 REQUIREMENT_LENGTH = 80  # a requirement is also a button label, which Discord caps at 80
 MAX_PING_ROLES = 10
+NO_ROLE = 0  # the "No role" choice in the role picker
 DEFAULT_OFFICER_ROLE_ID = 1562187200081428490  # members with this role may manage any event
 MAX_ROLES = 10
 MAX_ROLE_REQUIREMENTS = 5
@@ -181,7 +182,7 @@ async def resolve_image(
 class EventControls(discord.ui.View):
     """Persistent controls on an event post: RSVP, Withdraw, Check in, Manage.
 
-    Requirements are confirmed inside the private RSVP walkthrough, so new posts carry no requirement
+    Requirements are confirmed inside the private Signup walkthrough, so new posts carry no requirement
     buttons. The registration copy still knows the old fixed slots (``eventcheckin:req:<1-10>``) so
     posts made by earlier versions keep working after a restart.
     """
@@ -212,7 +213,7 @@ class EventControls(discord.ui.View):
 
         return callback
 
-    @discord.ui.button(label="RSVP", emoji="✅", style=discord.ButtonStyle.success, custom_id="eventcheckin:rsvp", row=0)
+    @discord.ui.button(label="Signup", emoji="✅", style=discord.ButtonStyle.success, custom_id="eventcheckin:rsvp", row=0)
     async def rsvp(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.cog.handle_button(interaction, "rsvp")
 
@@ -416,7 +417,7 @@ class EditRequirementsModal(discord.ui.Modal):
         self.requirements_input = add_text_field(
             self,
             "Requirements (one per line)",
-            hint=f"Members tick each one when they RSVP. Up to {MAX_REQUIREMENTS}. Empty removes them all.",
+            hint=f"Members tick each one when they sign up. Up to {MAX_REQUIREMENTS}. Empty removes them all.",
             style=discord.TextStyle.paragraph,
             default=current or None,
             placeholder="I have read the rules\nI can stay for the whole session",
@@ -650,7 +651,7 @@ class RolesEditorView(discord.ui.View):
 
 
 class EventRequirementsView(discord.ui.View):
-    """Step 1 of the RSVP walkthrough: tick every event-wide requirement, then continue."""
+    """Step 1 of the Signup walkthrough: tick every event-wide requirement, then continue."""
 
     def __init__(self, cog: EventCheckin, user_id: int, event: dict[str, Any]) -> None:
         super().__init__(timeout=600)
@@ -708,7 +709,7 @@ class EventRequirementsView(discord.ui.View):
 
 
 class RolePickerView(discord.ui.View):
-    """Member: choose which role to sign up for (private, shown after pressing RSVP)."""
+    """Member: choose which role to sign up for (private, shown after pressing Signup)."""
 
     def __init__(self, cog: EventCheckin, user_id: int, event: dict[str, Any]) -> None:
         super().__init__(timeout=300)
@@ -725,6 +726,10 @@ class RolePickerView(discord.ui.View):
             options.append(
                 discord.SelectOption(label=str(role["name"])[:100], value=str(role["id"]), description=detail[:100])
             )
+        capacity = int(event.get("capacity") or 0)
+        going = sum(record.get("status") in {"going", "checked_in"} for record in event.get("attendees", {}).values())
+        free = "event is full - join the waitlist" if capacity and going >= capacity else "join without a specific role"
+        options.append(discord.SelectOption(label="No role", value=str(NO_ROLE), description=free[:100], emoji="➖"))
         self.select = discord.ui.Select(placeholder="Choose your role...", options=options)
         self.select.callback = self._picked
         self.add_item(self.select)
@@ -1124,10 +1129,6 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         self._add_role_fields(embed, event)
         if event.get("image_url"):
             embed.set_image(url=event["image_url"])
-        if event.get("source_type") and event["source_type"] != "manual":
-            source = event["source_type"].replace("_", " ").title()
-            value = f"{source} #{event['source_id']}" if event.get("source_id") else source
-            embed.add_field(name="Created from", value=value, inline=False)
         embed.set_footer(text=f"Event #{event['event_id']} · {counts['checked_in']} checked in")
         return embed
 
@@ -1332,10 +1333,10 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         known = {role["id"] for role in roles}
         unassigned = [r["user_id"] for r in attendees if r.get("status") in {"going", "checked_in"} and r.get("role_id") not in known]
         if unassigned:
-            embed.add_field(name=f"No role yet ({len(unassigned)})", value=self._names(unassigned))
+            embed.add_field(name=f"No role ({len(unassigned)})", value=self._names(unassigned))
         unassigned_waiting = [r["user_id"] for r in attendees if r.get("status") == "waitlist" and r.get("role_id") not in known]
         if unassigned_waiting:
-            embed.add_field(name=f"⏳ Waiting ({len(unassigned_waiting)})", value=self._names(unassigned_waiting))
+            embed.add_field(name=f"⏳ Waiting, no role ({len(unassigned_waiting)})", value=self._names(unassigned_waiting))
         needs = [f"**{role['name']}**: " + "; ".join(role["requirements"]) for role in roles if role.get("requirements")]
         if needs:
             embed.add_field(name="Role requirements", value="\n".join(needs)[:1024], inline=False)
@@ -1449,7 +1450,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 intro = (
                     f"You are currently **{discord.utils.escape_markdown(held['name'])}**. Pick a different role to switch."
                     if held and current.get("status") in {"going", "waitlist"}
-                    else "Pick the role you want to play."
+                    else "You are signed up with no role. Pick a role to switch."
+                    if current and current.get("status") in {"going", "waitlist"}
+                    else "Pick the role you want to play, or choose **No role** to just join the event."
                 )
                 await interaction.response.send_message(
                     intro, view=RolePickerView(self, interaction.user.id, event), ephemeral=True
@@ -1471,13 +1474,13 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             response = "You are registered." if status == "going" else "The event is full; you joined the waitlist."
         elif action == "withdraw":
             if not current or current.get("status") not in {"going", "waitlist"}:
-                response = "You do not have an active RSVP."
+                response = "You are not signed up."
             else:
                 was_going = current.get("status") == "going"
                 current["status"] = "withdrawn"
                 current["withdrawn_at"] = self._now()
                 promoted_id = self._promote(event) if was_going else None
-                response = "Your RSVP was withdrawn."
+                response = "Your sign-up was withdrawn."
         else:
             early = event["starts_at"] - int(await self.config.guild(interaction.guild).checkin_early_minutes()) * 60
             late = event["starts_at"] + int(await self.config.guild(interaction.guild).checkin_late_minutes()) * 60
@@ -1485,9 +1488,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 early = min(early, int(event["started_at"]))
                 late = max(late, int(event["started_at"]) + int(await self.config.guild(interaction.guild).checkin_late_minutes()) * 60)
             if not current or current.get("status") != "going":
-                response = "You must have a confirmed RSVP before checking in."
+                response = "You must have a confirmed sign-up before checking in."
             elif missing:
-                response = "The event requirements changed. Press **RSVP** to confirm these, then check in:\n" + self._missing_text(missing)
+                response = "The event requirements changed. Press **Signup** to confirm these, then check in:\n" + self._missing_text(missing)
             elif not early <= self._now() <= late:
                 response = f"Check-in is available from <t:{early}:F> through <t:{late}:F>."
             else:
@@ -1925,7 +1928,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             registered = attendee.get("status") in {"going", "waitlist", "checked_in"}
         done = len(requirements) - len(missing)
         if not missing:
-            tail = "You are registered." if registered else "Now press **RSVP** to join."
+            tail = "You are registered." if registered else "Now press **Signup** to join."
             text = f"✅ Confirmed. All {len(requirements)} requirement(s) done. {tail}"
         else:
             text = f"✅ Confirmed: {requirement['text']} ({done}/{len(requirements)}).\nStill to confirm:\n" + self._missing_text(missing)
@@ -1964,7 +1967,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             await self._save(guild, events, event)
         await interaction.response.send_message(
             f"Requirements updated: **{count}** on event #{event_id}."
-            + (" Members confirm each one when they press RSVP." if count else " RSVP no longer needs confirmations."),
+            + (" Members confirm each one when they press Signup." if count else " Signing up no longer needs confirmations."),
             ephemeral=True,
         )
         await self._refresh(guild, event)
@@ -2085,7 +2088,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         roles = self._roles(event)
         embed = discord.Embed(title=f"Roles - event #{event['event_id']}", color=self.COLOR)
         if not roles:
-            embed.description = "No roles yet. Without roles, everyone simply RSVPs. Add one to let members pick a role."
+            embed.description = "No roles yet. Without roles, everyone simply signs up. Add one to let members pick a role."
             return embed
         lines = []
         for role in roles:
@@ -2212,7 +2215,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                     affected += record.get("status") in {"going", "checked_in", "waitlist"}
             promoted = self._promote_all(event)
             await self._save(guild, events, event)
-        note = f" {affected} member(s) now have no role and can press RSVP to pick another." if affected else ""
+        note = f" {affected} member(s) now have no role and can press Signup to pick another." if affected else ""
         await interaction.response.send_message(
             f"Removed role **{discord.utils.escape_markdown(role['name'])}**.{note}",
             embed=self._roles_embed(event),
@@ -2267,8 +2270,10 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             held = self._role(event, current.get("role_id"))
             if held and status in {"going", "waitlist"}:
                 text = f"✅ Requirements confirmed. You are **{discord.utils.escape_markdown(held['name'])}**. Pick a different role to switch."
+            elif status in {"going", "waitlist"}:
+                text = "✅ Requirements confirmed. You are signed up with no role. Pick a role to switch."
             else:
-                text = "✅ Requirements confirmed.\n**Step 2: pick the role you want to play.**"
+                text = "✅ Requirements confirmed.\n**Step 2: pick the role you want to play, or choose No role.**"
             await interaction.response.edit_message(content=text, view=view)
             return
         if status in {"going", "waitlist"}:
@@ -2296,7 +2301,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 return
             if self._missing_requirements(event, member.id):
                 await interaction.response.edit_message(
-                    content="The event requirements changed. Press **RSVP** again to confirm them.", view=None
+                    content="The event requirements changed. Press **Signup** again to confirm them.", view=None
                 )
                 return
             attendees = event.setdefault("attendees", {})
@@ -2331,7 +2336,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             await interaction.response.edit_message(content="That event no longer exists.", view=None)
             return
         role = self._role(event, role_id)
-        if event["status"] != "open" or event.get("started_at") or role is None:
+        if event["status"] != "open" or event.get("started_at") or (role is None and role_id != NO_ROLE):
             text = (
                 "Registration for this event is closed."
                 if event["status"] != "open"
@@ -2341,7 +2346,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
             )
             await interaction.response.edit_message(content=text, view=None)
             return
-        if role.get("requirements"):
+        if role is not None and role.get("requirements"):
             await interaction.response.edit_message(
                 content=f"**{discord.utils.escape_markdown(role['name'])}** needs you to confirm each of these. Tick them all, then confirm:",
                 view=RoleRequirementsView(self, interaction.user.id, event_id, role),
@@ -2374,27 +2379,35 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                     else "🔒 Sign-ups are locked: this event has already started."
                 )
                 return
-            if role is None:
-                await reply("That role was removed. Press RSVP again to pick another.")
+            if role is None and role_id != NO_ROLE:
+                await reply("That role was removed. Press Signup again to pick another.")
                 return
             missing = self._missing_requirements(event, member.id)
             if missing:
-                await reply("The event requirements changed. Press **RSVP** again to confirm them first.")
+                await reply("The event requirements changed. Press **Signup** again to confirm them first.")
                 return
             attendees = event.setdefault("attendees", {})
             key = str(member.id)
             current = attendees.get(key)
-            role_label = discord.utils.escape_markdown(discord.utils.escape_mentions(role["name"]))
+            no_role = role is None
+            role_label = "no role" if no_role else discord.utils.escape_markdown(discord.utils.escape_mentions(role["name"]))
+            stored_role = None if no_role else role_id
             if current and current.get("status") == "checked_in":
                 await reply("You are already checked in.")
                 return
-            if current and current.get("role_id") == role_id and current.get("status") in {"going", "waitlist"}:
+            same = (
+                self._role(event, current.get("role_id")) is None if no_role else current.get("role_id") == role_id
+            ) if current else False
+            if same and current.get("status") in {"going", "waitlist"}:
                 waiting = current.get("status") == "waitlist"
-                await reply(f"You are already {'waiting for' if waiting else 'signed up as'} **{role_label}**.")
+                if no_role:
+                    await reply(f"You are already {'on the waitlist' if waiting else 'signed up'} with no role.")
+                else:
+                    await reply(f"You are already {'waiting for' if waiting else 'signed up as'} **{role_label}**.")
                 return
 
             was_going = bool(current and current.get("status") == "going")
-            slots = int(role.get("slots") or 0)
+            slots = 0 if no_role else int(role.get("slots") or 0)
             capacity = int(event.get("capacity") or 0)
             role_full = bool(slots) and self._role_filled(event, role_id, exclude=member.id) >= slots
             others_going = sum(
@@ -2414,14 +2427,16 @@ class EventCheckin(DashboardIntegration, commands.Cog):
                 "checked_in_at": current.get("checked_in_at") if current else None,
                 "promoted_at": current.get("promoted_at") if current else None,
                 "staff_actor_id": None,
-                "role_id": role_id,
+                "role_id": stored_role,
             }
             if was_going:
                 promoted = self._promote_all(event)  # the role they left has a free seat
             await self._save(guild, events, event)
 
         if status == "going":
-            text = f"✅ You're in as **{role_label}**."
+            text = "✅ You're in with no role." if no_role else f"✅ You're in as **{role_label}**."
+        elif no_role:
+            text = "⏳ The event is full. You're on the waitlist."
         elif role_full:
             text = f"⏳ **{role_label}** is full. You're on its waitlist and will be pinged if a spot opens."
         else:
@@ -2479,9 +2494,9 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         waiting = sum(record.get("status") == "waitlist" for record in event.get("attendees", {}).values())
         await interaction.response.send_message(
             f"Start **{discord.utils.escape_markdown(event['title'])}** now?\n"
-            "• New sign-ups and role changes are locked (the RSVP button is switched off)\n"
+            "• New sign-ups and role changes are locked (the Signup button is switched off)\n"
             "• The post is marked as started\n"
-            "• Members who already RSVPed can still check in or withdraw"
+            "• Members who already signed up can still check in or withdraw"
             + (f"\n• {waiting} member(s) on the waitlist stay there and are still promoted if a seat opens" if waiting else ""),
             view=ConfirmActionView(
                 member.id,
@@ -2543,7 +2558,7 @@ class EventCheckin(DashboardIntegration, commands.Cog):
         reward = f"{arrived} checked-in member(s) receive {role.mention}" if role else "no reward role is set"
         await interaction.response.send_message(
             f"Finalize **{discord.utils.escape_markdown(event['title'])}**?\n"
-            f"• Registration closes\n• {no_shows} confirmed RSVP(s) who never checked in become no-shows\n• {reward}\n"
+            f"• Registration closes\n• {no_shows} confirmed sign-up(s) who never checked in become no-shows\n• {reward}\n"
             "This can't be undone.",
             view=ConfirmActionView(
                 member.id,
